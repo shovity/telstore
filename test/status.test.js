@@ -458,6 +458,34 @@ test('a restore whose .partial is gone says so instead of offering a command', a
   assert.doesNotMatch(text, /npx telstore restore/)
 })
 
+test('a restore whose .partial cannot be read says so, not that it is gone', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+
+  const dir = await tempDir('status-target')
+  const target = path.join(dir, 'out.tar')
+  await fs.writeFile(`${target}.partial`, 'x')
+  await savedRestore(configDir, { target })
+
+  // No execute permission on the parent directory turns fs.stat into EACCES — the file is
+  // still there, unlike the ENOENT case the existing wording is written for.
+  await fs.chmod(dir, 0o000)
+
+  const out = collect()
+  try {
+    await runStatus({}, {
+      configDir, log: out.log,
+      connect: async () => fakeClient(), disconnect: async () => {},
+    })
+  } finally {
+    await fs.chmod(dir, 0o755)
+  }
+
+  const text = out.text()
+  assert.match(text, /not possible: the partial download cannot be read\./)
+  assert.doesNotMatch(text, /no longer there/)
+})
+
 test('uploads and restores are counted separately in one line', async () => {
   const configDir = await tempDir('status')
   await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)

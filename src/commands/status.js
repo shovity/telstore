@@ -54,6 +54,15 @@ const NO_RESUME = {
   unreadable: 'the record does not name a file that can be read',
 }
 
+// Why the .partial cannot be resumed from, in the same spirit as NO_RESUME above: an
+// EACCES or an ELOOP is not the same fact as the file being gone, and telling the user
+// their multi-gigabyte download vanished when it is sitting there, unreadable, sends them
+// looking for the wrong problem.
+const NO_PARTIAL_RESUME = {
+  missing: 'the partial download is no longer there',
+  unreadable: 'the partial download cannot be read',
+}
+
 // A command is printed only when it will really resume. Printing one regardless would be
 // telling the user to run something that quietly starts a second backup and abandons every
 // chunk this one already sent — and those chunks are then findable only by this id, which
@@ -93,8 +102,10 @@ function restoreCommand(record, destination) {
 async function restoreResumeLine(record, destination) {
   try {
     await fs.stat(`${record.target}.partial`)
-  } catch {
-    return field('Resume', 'not possible: the partial download is no longer there.')
+  } catch (err) {
+    const reason = err.code === 'ENOENT' ? 'missing' : 'unreadable'
+
+    return field('Resume', `not possible: ${NO_PARTIAL_RESUME[reason]}.`)
   }
 
   return field('Resume', restoreCommand(record, destination))
