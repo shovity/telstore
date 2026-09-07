@@ -529,6 +529,32 @@ test('a restore record that will not parse does not take the report down', async
   assert.match(out.text(), /1 restore/)
 })
 
+test('an upload record with a damaged size does not take the report down', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+
+  // Parses, reaches the renderer, and carries a field the renderer does arithmetic on —
+  // formatBytes used to throw on this, taking every entry sorted after it down too.
+  await saveState('aaa', {
+    id: 'telstore-20260905-02e053',
+    chat: '@my_backups',
+    path: '/home/ai/data.tar',
+    size: 'not-a-number',
+    mtimeMs: 1,
+    chunkSize: 40,
+    done: {},
+  }, configDir)
+
+  const out = collect()
+  await runStatus({}, {
+    configDir, log: out.log,
+    connect: async () => fakeClient(), disconnect: async () => {},
+  })
+
+  assert.match(out.text(), /Sho \(@shovity\)/)
+  assert.match(out.text(), /1 upload/)
+})
+
 test('a restore record with a damaged size does not take the report down', async () => {
   const configDir = await tempDir('status')
   await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
