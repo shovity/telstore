@@ -10,7 +10,7 @@ import { saveConfig } from '../src/config.js'
 import { createProgress } from '../src/progress.js'
 import { DEFAULT_DOWNLOAD_CONCURRENCY } from '../src/chunking.js'
 
-import { tempDir } from './helpers.js'
+import { collect, tempDir } from './helpers.js'
 
 function sha(buf) {
   return createHash('sha256').update(buf).digest('hex')
@@ -81,6 +81,18 @@ function deps(client, configDir) {
         onProgress?.(buf.length)
       }
       return { sha256: hash.digest('hex'), size: written }
+    },
+  }
+}
+
+// Records which chunk messages a run actually fetched. A resumed restore is only
+// resumed if it never asked for the chunks it claims to have skipped.
+function watchGetMessage(base, asked) {
+  return {
+    ...base,
+    getMessage: (c, peer, msgId) => {
+      asked.push(msgId)
+      return c.getMessage(peer, msgId)
     },
   }
 }
@@ -569,4 +581,133 @@ test('with no flag the download pool gets the built-in default', async () => {
   )
 
   assert.deepEqual(seen, backup.manifest.chunks.map(() => DEFAULT_DOWNLOAD_CONCURRENCY))
+})
+
+test('resumes from a .partial that already holds the first chunks', async () => {
+  const backup = fakeBackup()
+  const { dir, configDir } = await tempConfig()
+  const out = path.join(dir, 'out.tar')
+
+  const partial = Buffer.alloc(1000)
+  backup.content.copy(partial, 0, 0, 800)
+  await fs.writeFile(`${out}.partial`, partial)
+
+  const asked = []
+  await runRestore(backup.id, { out }, watchGetMessage(deps(fakeClient(backup), configDir), asked))
+
+  assert.deepEqual(asked, [1002])
+  assert.deepEqual(await fs.readFile(out), backup.content)
+})
+
+test('a corrupt region in the .partial re-downloads it and everything after it', async () => {
+  const backup = fakeBackup()
+  const { dir, configDir } = await tempConfig()
+  const out = path.join(dir, 'out.tar')
+
+  // Every byte is right except one inside chunk 2. Chunk 3 is byte-perfect and is
+  // still re-fetched: what is already there is a prefix, and the scan stops at the
+  // first thing it cannot vouch for rather than picking survivors out of the middle.
+  const partial = Buffer.from(backup.content)
+  partial[500] ^= 0xff
+  await fs.writeFile(`${out}.partial`, partial)
+
+  const asked = []
+  await runRestore(backup.id, { out }, watchGetMessage(deps(fakeClient(backup), configDir), asked))
+
+  assert.deepEqual(asked, [1001, 1002])
+  assert.deepEqual(await fs.readFile(out), backup.content)
+})
+
+test('a .partial shorter than the file resumes at the right chunk', async () => {
+  const backup = fakeBackup()
+  const { dir, configDir } = await tempConfig()
+  const out = path.join(dir, 'out.tar')
+
+  await fs.writeFile(`${out}.partial`, backup.content.subarray(0, 400))
+
+  const asked = []
+  await runRestore(backup.id, { out }, watchGetMessage(deps(fakeClient(backup), configDir), asked))
+
+  assert.deepEqual(asked, [1001, 1002])
+  assert.deepEqual(await fs.readFile(out), backup.content)
+})
+
+test('a .partial matching nothing is downloaded over from the start', async () => {
+  const backup = fakeBackup()
+  const { dir, configDir } = await tempConfig()
+  const out = path.join(dir, 'out.tar')
+
+  await fs.writeFile(`${out}.partial`, randomBytes(1000))
+
+  const asked = []
+  await runRestore(backup.id, { out }, watchGetMessage(deps(fakeClient(backup), configDir), asked))
+
+  assert.deepEqual(asked, [1000, 1001, 1002])
+  assert.deepEqual(await fs.readFile(out), backup.content)
+})
+
+test('a complete .partial is renamed without downloading anything', async () => {
+  const backup = fakeBackup()
+  const { dir, configDir } = await tempConfig()
+  const out = path.join(dir, 'out.tar')
+
+  // What a run that died between its last chunk and the rename leaves behind.
+  await fs.writeFile(`${out}.partial`, backup.content)
+
+  const asked = []
+  await runRestore(backup.id, { out }, watchGetMessage(deps(fakeClient(backup), configDir), asked))
+
+  assert.deepEqual(asked, [])
+  assert.deepEqual(await fs.readFile(out), backup.content)
+})
+
+test('a fresh restore never scans for anything to resume', async () => {
+  const backup = fakeBackup()
+  const { dir, configDir } = await tempConfig()
+  const out = path.join(dir, 'out.tar')
+  const seen = collect()
+
+  await runRestore(backup.id, { out }, {
+    ...deps(fakeClient(backup), configDir),
+    silent: false,
+    log: seen.log,
+    writeErr: () => {},
+  })
+
+  assert.doesNotMatch(seen.text(), /Checking what is already/)
+  assert.deepEqual(await fs.readFile(out), backup.content)
+})
+
+test('a .partial that cannot be opened stops the restore rather than starting over', async () => {
+  const backup = fakeBackup()
+  const { dir, configDir } = await tempConfig()
+  const out = path.join(dir, 'out.tar')
+
+  // A directory where the .partial belongs: open fails with something that is not ENOENT.
+  // Treating that as "no file yet" would truncate nothing, download everything, and fail
+  // only at the rename — two hours later, for a reason nobody could read off the error.
+  await fs.mkdir(`${out}.partial`)
+
+  await assert.rejects(() => runRestore(backup.id, { out }, deps(fakeClient(backup), configDir)))
+})
+
+test('a resumed restore names the chunks it skipped', async () => {
+  const backup = fakeBackup()
+  const { dir, configDir } = await tempConfig()
+  const out = path.join(dir, 'out.tar')
+  const seen = collect()
+
+  const partial = Buffer.alloc(1000)
+  backup.content.copy(partial, 0, 0, 400)
+  await fs.writeFile(`${out}.partial`, partial)
+
+  await runRestore(backup.id, { out }, {
+    ...deps(fakeClient(backup), configDir),
+    silent: false,
+    log: seen.log,
+    writeErr: () => {},
+  })
+
+  assert.match(seen.text(), /Chunk 1\/3 already restored, skipping\./)
+  assert.doesNotMatch(seen.text(), /Chunk 2\/3 already restored/)
 })

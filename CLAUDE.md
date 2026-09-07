@@ -47,6 +47,7 @@ anything that row names** — not afterwards, and not only when something looks 
 | Before you change | Read |
 | --- | --- |
 | `src/manifest.js`, `src/state.js`, `src/chunking.js`, `src/config.js` | `docs/design/data-integrity.md` |
+| `src/commands/restore.js`, the resume scan | `docs/design/data-integrity.md` |
 | `src/stall.js`, `src/retry.js`, anything that waits on the network | `docs/design/stalls-and-retries.md` |
 | `src/token.js`, `src/session.js`, `src/commands/login.js`, `src/commands/token.js` | `docs/design/session-tokens.md` |
 | `src/commands/delete.js`, the delete path in `src/client.js` | `docs/design/delete.md` |
