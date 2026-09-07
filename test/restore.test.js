@@ -741,6 +741,39 @@ test('the record tracks an unfinished restore and is gone once it finishes', asy
   await assert.rejects(() => fs.stat(restoreFile(key, configDir)), { code: 'ENOENT' })
 })
 
+test('the record is keyed on the id the user typed, not the one inside the manifest', async () => {
+  // Nothing validates manifest.id against the name it was found under, so a manifest can
+  // carry a different id than the one the user typed to find it. The record has to use the
+  // typed id: it is what restoreKey already hashed, and what a pasted resume command types
+  // back in — a record built from manifest.id would resolve to a manifest search that finds
+  // nothing, or fail listRestores' string check entirely if manifest.id were missing.
+  const backup = fakeBackup({ id: 'telstore-inner-id' })
+  const { dir, configDir } = await tempConfig()
+  const out = path.join(dir, 'out.tar')
+  const typedId = 'telstore-typed-id'
+  const key = restoreKey(typedId, out)
+  const seen = []
+
+  const client = fakeClient(backup)
+  const base = {
+    ...deps(client, configDir),
+    // Found under whatever name the search asks for, regardless of what id it carries
+    // inside itself — exactly what a manifest with a mismatched id looks like.
+    searchManifest: async () => client.searchManifest(null, backup.id),
+  }
+
+  await runRestore(typedId, { out }, {
+    ...base,
+    downloadChunk: async (...args) => {
+      seen.push(JSON.parse(await fs.readFile(restoreFile(key, configDir), 'utf8')))
+      return await base.downloadChunk(...args)
+    },
+  })
+
+  assert.equal(seen.length, 3)
+  assert.equal(seen[0].id, typedId)
+})
+
 test('a resumed restore records the chunks it found rather than starting the count over', async () => {
   const backup = fakeBackup()
   const { dir, configDir } = await tempConfig()
@@ -785,5 +818,10 @@ test('a record that cannot be written does not fail the restore', async () => {
 
   assert.equal(result.size, 1000)
   assert.deepEqual(await fs.readFile(out), backup.content)
-  assert.match(warnings.text(), /could not record restore progress/)
+
+  // note() is called once before the loop and once per chunk — four times for this
+  // three-chunk backup — and every one of them fails the same way. Warning on each would
+  // tear through the progress bar four times over; the spec says once.
+  const warningCount = (warnings.text().match(/could not record restore progress/g) ?? []).length
+  assert.equal(warningCount, 1)
 })

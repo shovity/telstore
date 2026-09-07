@@ -144,13 +144,19 @@ export async function runRestore(backupId, options = {}, deps = {}) {
     // a signpost that cannot be planted warns and gets out of the way. Deliberately the
     // opposite of markChunkDone, where a failed write must be fatal because losing it
     // strands chunks in a chat with nothing left pointing at them.
+    // A record that cannot be written warns once, not once per chunk: warn is the same
+    // stderr stream the progress bar owns with \r, and a warning for every one of ~30
+    // chunks on a real restore would tear through the bar as badly as the retry
+    // announcements above reason about at length.
+    let recordWarned = false
+
     async function note(done) {
       try {
         await saveRestore(
           key,
           {
             v: 1,
-            id: manifest.id,
+            id: backupId,
             target,
             chat: String(chat),
             size: manifest.size,
@@ -160,6 +166,8 @@ export async function runRestore(backupId, options = {}, deps = {}) {
           configDir,
         )
       } catch (err) {
+        if (recordWarned) return
+        recordWarned = true
         warn(`\nWarning: could not record restore progress: ${err.message}\n`)
       }
     }
