@@ -36,7 +36,7 @@ Usage:
   npx telstore list                       List the backups stored in the destination
   npx telstore restore <backup-id>...     Download the chunks and reassemble the files
   npx telstore delete <backup-id>...      Remove backups' chunks and manifests from the chat
-  npx telstore status                     Show the account, the destination and unfinished backups
+  npx telstore status                     Show the account, the destination and unfinished uploads and restores
   npx telstore config                     Show every setting and where its value comes from
   npx telstore logout                     Remove the saved session
 

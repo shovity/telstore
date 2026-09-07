@@ -29,7 +29,7 @@ npx telstore restore telstore-20260905-7f3a91
 | `telstore list` | The backups stored in the destination, newest first. |
 | `telstore restore <backup-id>...` | Download every chunk and reassemble the file. Several ids run one after another. |
 | `telstore delete <backup-id>...` | Remove a backup's chunks and manifest from the chat, for good. Several ids are listed and confirmed once. |
-| `telstore status` | Account, destination, and unfinished backups. |
+| `telstore status` | Account, destination, and unfinished uploads and restores. |
 | `telstore config` | Show or change settings. |
 | `telstore token` | Print a session token for a machine you do not trust. |
 | `telstore logout` | Remove the locally stored session. |
@@ -143,7 +143,14 @@ After a batch, run telstore again with **only the files that are left**: the fin
 have had their records cleared, so repeating the whole command would upload them a second
 time as new backups. `npx telstore status` lists what is unfinished.
 
-**Restore keeps no state** — `Ctrl-C` mid-restore saves nothing, running again starts over.
+## Resuming a restore
+
+`Ctrl-C` mid-restore keeps the `<target>.partial` file rather than throwing it away. Running
+the same command again hashes each chunk-sized region of it against the manifest, in order,
+and carries on from the first one that does not match — nothing already on disk is trusted
+just because it is there. `npx telstore status` lists unfinished restores alongside
+unfinished uploads, with a resume command for each.
+
 And `delete` has **no undo**: Telegram is the only copy.
 
 ## Running on a machine you do not trust
