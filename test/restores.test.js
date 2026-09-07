@@ -286,5 +286,30 @@ test('a batch reaches onBackupId for each id, so Ctrl-C can name whichever is in
     process.chdir(cwd)
   }
 
-  assert.deepEqual(seen, chat.ids)
+  // Cleared back to null after each id finishes, so a Ctrl-C while the next id is still
+  // connecting or blocked at the overwrite prompt does not go on naming the previous one.
+  assert.deepEqual(seen, [chat.ids[0], null, chat.ids[1], null])
+})
+
+test('onBackupId is cleared even when an id in the batch fails', async () => {
+  const chat = fakeChat(['a.tar', 'b.tar'])
+  const { dir, configDir } = await workspace()
+  const cwd = process.cwd()
+  const seen = []
+
+  process.chdir(dir)
+
+  try {
+    await runRestores(chat.ids, {}, {
+      ...deps(chat, configDir),
+      searchManifest: async () => null,
+      onBackupId: (id) => seen.push(id),
+    })
+  } finally {
+    process.chdir(cwd)
+  }
+
+  // Neither id ever opens a .partial (searchManifest finds nothing), so onBackupId is
+  // never told an id — only cleared, which must still be a no-op on an already-null value.
+  assert.deepEqual(seen, [null, null])
 })

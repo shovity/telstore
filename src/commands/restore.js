@@ -353,6 +353,7 @@ export async function runRestores(backupIds, options = {}, deps = {}) {
     log: writeLog = (line) => console.log(line),
     silent = false,
     onRestoreDone = () => {},
+    onBackupId = () => {},
   } = deps
 
   // One id must read exactly as it did before this existed: --out still works, the error still
@@ -418,6 +419,12 @@ export async function runRestores(backupIds, options = {}, deps = {}) {
         // over it — so it is named here, and again down there, and carried out as exit code 1.
         results.push({ id: backupId, error: err.message })
         warn(`\n${backupId} failed: ${err.message}\n`)
+      } finally {
+        // Cleared whether this id finished, failed, or never got as far as opening a
+        // .partial: otherwise a Ctrl-C while the next id is still connecting, searching for
+        // its manifest, or blocked at the overwrite prompt would go on naming this one, as
+        // though there were a file to carry on from when there is none yet.
+        onBackupId(null)
       }
     }
   } finally {
