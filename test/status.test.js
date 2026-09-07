@@ -5,7 +5,7 @@ import path from 'node:path'
 
 import { runStatus } from '../src/commands/status.js'
 import { loadConfig, saveConfig } from '../src/config.js'
-import { restoreKey, saveRestore, saveState, stateKey } from '../src/state.js'
+import { restoreFile, restoreKey, saveRestore, saveState, stateFile, stateKey } from '../src/state.js'
 
 import { LOGGED_IN, collect, tempDir } from './helpers.js'
 
@@ -458,6 +458,50 @@ test('a restore whose .partial is gone says so instead of offering a command', a
   assert.doesNotMatch(text, /npx telstore restore/)
 })
 
+test('unfinished uploads and restores are listed newest first, mixed together', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+
+  const oldKey = stateKey('/home/ai/old.tar', 100, 1)
+  await saveState(oldKey, {
+    id: 'telstore-old', chat: '@my_backups', path: '/home/ai/old.tar',
+    size: 100, mtimeMs: 1, chunkSize: 40, done: {},
+  }, configDir)
+
+  const midKey = restoreKey('telstore-mid', '/home/ai/mid.tar')
+  await saveRestore(midKey, {
+    v: 1, id: 'telstore-mid', target: '/home/ai/mid.tar', chat: '@my_backups',
+    size: 100, chunks: 3, done: 1,
+  }, configDir)
+
+  const newKey = stateKey('/home/ai/new.tar', 100, 1)
+  await saveState(newKey, {
+    id: 'telstore-new', chat: '@my_backups', path: '/home/ai/new.tar',
+    size: 100, mtimeMs: 1, chunkSize: 40, done: {},
+  }, configDir)
+
+  // Set deliberately, minutes apart, rather than hoping a tight write loop produces
+  // genuinely different mtimes on whatever filesystem the tests happen to run on.
+  const now = Date.now() / 1000
+  await fs.utimes(stateFile(oldKey, configDir), now, now - 3000)
+  await fs.utimes(restoreFile(midKey, configDir), now, now - 2000)
+  await fs.utimes(stateFile(newKey, configDir), now, now - 1000)
+
+  const out = collect()
+  await runStatus({}, {
+    configDir, log: out.log,
+    connect: async () => fakeClient(), disconnect: async () => {},
+  })
+
+  const text = out.text()
+  const posNew = text.indexOf('telstore-new')
+  const posMid = text.indexOf('telstore-mid')
+  const posOld = text.indexOf('telstore-old')
+
+  assert.ok(posNew >= 0 && posMid >= 0 && posOld >= 0, `expected all three ids in:\n${text}`)
+  assert.ok(posNew < posMid && posMid < posOld, `expected newest-first order, got:\n${text}`)
+})
+
 test('a restore whose .partial cannot be read says so, not that it is gone', async () => {
   const configDir = await tempDir('status')
   await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
@@ -507,6 +551,33 @@ test('uploads and restores are counted separately in one line', async () => {
   })
 
   assert.match(out.text(), /Unfinished\s+1 upload, 1 restore/)
+})
+
+test('the plural forms show up once there is more than one of a kind', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+
+  await saveState(stateKey('/home/ai/a.tar', 100, 1757000000000), {
+    id: 'telstore-20260905-000001', chat: '@my_backups', path: '/home/ai/a.tar',
+    size: 100, mtimeMs: 1757000000000, chunkSize: 40, done: {},
+  }, configDir)
+  await saveState(stateKey('/home/ai/b.tar', 100, 1757000000000), {
+    id: 'telstore-20260905-000002', chat: '@my_backups', path: '/home/ai/b.tar',
+    size: 100, mtimeMs: 1757000000000, chunkSize: 40, done: {},
+  }, configDir)
+
+  const dir = await tempDir('status-target')
+  const target = path.join(dir, 'out.tar')
+  await fs.writeFile(`${target}.partial`, 'x')
+  await savedRestore(configDir, { target })
+
+  const out = collect()
+  await runStatus({}, {
+    configDir, log: out.log,
+    connect: async () => fakeClient(), disconnect: async () => {},
+  })
+
+  assert.match(out.text(), /Unfinished\s+2 uploads, 1 restore/)
 })
 
 test('a restore record that will not parse does not take the report down', async () => {

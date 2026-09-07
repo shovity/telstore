@@ -637,14 +637,21 @@ test('a .partial matching nothing is downloaded over from the start', async () =
   const backup = fakeBackup()
   const { dir, configDir } = await tempConfig()
   const out = path.join(dir, 'out.tar')
+  const seen = collect()
 
   await fs.writeFile(`${out}.partial`, randomBytes(1000))
 
   const asked = []
-  await runRestore(backup.id, { out }, watchGetMessage(deps(fakeClient(backup), configDir), asked))
+  await runRestore(backup.id, { out }, {
+    ...watchGetMessage(deps(fakeClient(backup), configDir), asked),
+    silent: false,
+    log: seen.log,
+    writeErr: () => {},
+  })
 
   assert.deepEqual(asked, [1000, 1001, 1002])
   assert.deepEqual(await fs.readFile(out), backup.content)
+  assert.match(seen.text(), /Nothing in .*\.partial matches this backup, starting over\./)
 })
 
 test('a complete .partial is renamed without downloading anything', async () => {
