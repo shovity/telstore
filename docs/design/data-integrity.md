@@ -27,3 +27,11 @@
   `--chunk-size` that differs from the unfinished backup's own rather than starting over,
   and `pruneStates` (keeps `MAX_STATES` most recent) names on stderr every id it drops,
   even when the caller asked for silence.
+- A resumed `runRestore` decides what is already in `<target>.partial` by hashing each
+  chunk-sized region against the manifest, in order, stopping at the first that does not
+  match — never by reading a record. A record makes claims about a local file anyone can
+  edit between runs, and a claim that is wrong means those chunks are never hashed, the
+  final length check still passes (the file is truncated to `manifest.size` either way),
+  and telstore renames a corrupt file into place. Re-reading also costs a thirty-fourth of
+  re-downloading, so the cheap way and the safe way are the same way. Every chunk in a
+  finished file was hashed against the manifest by the run that renamed it.

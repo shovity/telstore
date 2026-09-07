@@ -5,7 +5,7 @@ import path from 'node:path'
 
 import { runStatus } from '../src/commands/status.js'
 import { loadConfig, saveConfig } from '../src/config.js'
-import { saveState, stateKey } from '../src/state.js'
+import { restoreFile, restoreKey, saveRestore, saveState, stateFile, stateKey } from '../src/state.js'
 
 import { LOGGED_IN, collect, tempDir } from './helpers.js'
 
@@ -381,4 +381,269 @@ test('status says when the session on this machine is sealed', async () => {
   })
 
   assert.match(out.text(), /Session\s+.*config\.json \(sealed/)
+})
+
+async function savedRestore(configDir, overrides = {}) {
+  const record = {
+    v: 1,
+    id: 'telstore-20260901-7c1b40',
+    target: '/home/ai/out.tar',
+    chat: '@my_backups',
+    size: 1000,
+    chunks: 7,
+    done: 4,
+    ...overrides,
+  }
+
+  await saveRestore(restoreKey(record.id, record.target), record, configDir)
+
+  return record
+}
+
+test('status names an unfinished restore and how to carry it on', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+
+  const dir = await tempDir('status-target')
+  const target = path.join(dir, 'out.tar')
+  await fs.writeFile(`${target}.partial`, 'x')
+  await savedRestore(configDir, { target })
+
+  const out = collect()
+  await runStatus({}, {
+    configDir, log: out.log,
+    connect: async () => fakeClient(), disconnect: async () => {},
+  })
+
+  const text = out.text()
+  assert.match(text, /1 restore/)
+  assert.match(text, /4 of 7 restored/)
+  assert.match(text, new RegExp(`npx telstore restore telstore-20260901-7c1b40 --out ${target}`))
+  assert.doesNotMatch(text, /--chat/)
+})
+
+test('a restore whose chunks are in another chat is resumed with --chat', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@somewhere_else' } }, configDir)
+
+  const dir = await tempDir('status-target')
+  const target = path.join(dir, 'out.tar')
+  await fs.writeFile(`${target}.partial`, 'x')
+  await savedRestore(configDir, { target })
+
+  const out = collect()
+  await runStatus({}, {
+    configDir, log: out.log,
+    connect: async () => fakeClient(), disconnect: async () => {},
+  })
+
+  assert.match(out.text(), /--chat @my_backups/)
+})
+
+test('a restore whose .partial is gone says so instead of offering a command', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+
+  const dir = await tempDir('status-target')
+  await savedRestore(configDir, { target: path.join(dir, 'out.tar') })
+
+  const out = collect()
+  await runStatus({}, {
+    configDir, log: out.log,
+    connect: async () => fakeClient(), disconnect: async () => {},
+  })
+
+  const text = out.text()
+  assert.match(text, /not possible: the partial download is no longer there/)
+  assert.doesNotMatch(text, /npx telstore restore/)
+})
+
+test('unfinished uploads and restores are listed newest first, mixed together', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+
+  const oldKey = stateKey('/home/ai/old.tar', 100, 1)
+  await saveState(oldKey, {
+    id: 'telstore-old', chat: '@my_backups', path: '/home/ai/old.tar',
+    size: 100, mtimeMs: 1, chunkSize: 40, done: {},
+  }, configDir)
+
+  const midKey = restoreKey('telstore-mid', '/home/ai/mid.tar')
+  await saveRestore(midKey, {
+    v: 1, id: 'telstore-mid', target: '/home/ai/mid.tar', chat: '@my_backups',
+    size: 100, chunks: 3, done: 1,
+  }, configDir)
+
+  const newKey = stateKey('/home/ai/new.tar', 100, 1)
+  await saveState(newKey, {
+    id: 'telstore-new', chat: '@my_backups', path: '/home/ai/new.tar',
+    size: 100, mtimeMs: 1, chunkSize: 40, done: {},
+  }, configDir)
+
+  // Set deliberately, minutes apart, rather than hoping a tight write loop produces
+  // genuinely different mtimes on whatever filesystem the tests happen to run on.
+  const now = Date.now() / 1000
+  await fs.utimes(stateFile(oldKey, configDir), now, now - 3000)
+  await fs.utimes(restoreFile(midKey, configDir), now, now - 2000)
+  await fs.utimes(stateFile(newKey, configDir), now, now - 1000)
+
+  const out = collect()
+  await runStatus({}, {
+    configDir, log: out.log,
+    connect: async () => fakeClient(), disconnect: async () => {},
+  })
+
+  const text = out.text()
+  const posNew = text.indexOf('telstore-new')
+  const posMid = text.indexOf('telstore-mid')
+  const posOld = text.indexOf('telstore-old')
+
+  assert.ok(posNew >= 0 && posMid >= 0 && posOld >= 0, `expected all three ids in:\n${text}`)
+  assert.ok(posNew < posMid && posMid < posOld, `expected newest-first order, got:\n${text}`)
+})
+
+test('a restore whose .partial cannot be read says so, not that it is gone', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+
+  const dir = await tempDir('status-target')
+  const target = path.join(dir, 'out.tar')
+  await fs.writeFile(`${target}.partial`, 'x')
+  await savedRestore(configDir, { target })
+
+  // No execute permission on the parent directory turns fs.stat into EACCES — the file is
+  // still there, unlike the ENOENT case the existing wording is written for.
+  await fs.chmod(dir, 0o000)
+
+  const out = collect()
+  try {
+    await runStatus({}, {
+      configDir, log: out.log,
+      connect: async () => fakeClient(), disconnect: async () => {},
+    })
+  } finally {
+    await fs.chmod(dir, 0o755)
+  }
+
+  const text = out.text()
+  assert.match(text, /not possible: the partial download cannot be read\./)
+  assert.doesNotMatch(text, /no longer there/)
+})
+
+test('uploads and restores are counted separately in one line', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+
+  await saveState(stateKey('/home/ai/data.tar', 100, 1757000000000), {
+    id: 'telstore-20260905-7f3a91', chat: '@my_backups', path: '/home/ai/data.tar',
+    size: 100, mtimeMs: 1757000000000, chunkSize: 40, done: {},
+  }, configDir)
+
+  const dir = await tempDir('status-target')
+  const target = path.join(dir, 'out.tar')
+  await fs.writeFile(`${target}.partial`, 'x')
+  await savedRestore(configDir, { target })
+
+  const out = collect()
+  await runStatus({}, {
+    configDir, log: out.log,
+    connect: async () => fakeClient(), disconnect: async () => {},
+  })
+
+  assert.match(out.text(), /Unfinished\s+1 upload, 1 restore/)
+})
+
+test('the plural forms show up once there is more than one of a kind', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+
+  await saveState(stateKey('/home/ai/a.tar', 100, 1757000000000), {
+    id: 'telstore-20260905-000001', chat: '@my_backups', path: '/home/ai/a.tar',
+    size: 100, mtimeMs: 1757000000000, chunkSize: 40, done: {},
+  }, configDir)
+  await saveState(stateKey('/home/ai/b.tar', 100, 1757000000000), {
+    id: 'telstore-20260905-000002', chat: '@my_backups', path: '/home/ai/b.tar',
+    size: 100, mtimeMs: 1757000000000, chunkSize: 40, done: {},
+  }, configDir)
+
+  const dir = await tempDir('status-target')
+  const target = path.join(dir, 'out.tar')
+  await fs.writeFile(`${target}.partial`, 'x')
+  await savedRestore(configDir, { target })
+
+  const out = collect()
+  await runStatus({}, {
+    configDir, log: out.log,
+    connect: async () => fakeClient(), disconnect: async () => {},
+  })
+
+  assert.match(out.text(), /Unfinished\s+2 uploads, 1 restore/)
+})
+
+test('a restore record that will not parse does not take the report down', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+
+  await savedRestore(configDir)
+  await fs.writeFile(
+    path.join(configDir, 'state', 'restore-deadbeef.json'),
+    '{ not json',
+  )
+
+  const out = collect()
+  await runStatus({}, {
+    configDir, log: out.log,
+    connect: async () => fakeClient(), disconnect: async () => {},
+  })
+
+  assert.match(out.text(), /Sho \(@shovity\)/)
+  assert.match(out.text(), /1 restore/)
+})
+
+test('an upload record with a damaged size does not take the report down', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+
+  // Parses, reaches the renderer, and carries a field the renderer does arithmetic on —
+  // formatBytes used to throw on this, taking every entry sorted after it down too.
+  await saveState('aaa', {
+    id: 'telstore-20260905-02e053',
+    chat: '@my_backups',
+    path: '/home/ai/data.tar',
+    size: 'not-a-number',
+    mtimeMs: 1,
+    chunkSize: 40,
+    done: {},
+  }, configDir)
+
+  const out = collect()
+  await runStatus({}, {
+    configDir, log: out.log,
+    connect: async () => fakeClient(), disconnect: async () => {},
+  })
+
+  assert.match(out.text(), /Sho \(@shovity\)/)
+  assert.match(out.text(), /1 upload/)
+})
+
+test('a restore record with a damaged size does not take the report down', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+
+  const dir = await tempDir('status-target')
+  const target = path.join(dir, 'out.tar')
+  await fs.writeFile(`${target}.partial`, 'x')
+
+  // Parses, reaches the renderer, and carries a field the renderer does arithmetic on.
+  // The unparseable-JSON test above never gets this far: readRecord drops it first.
+  await savedRestore(configDir, { target, size: 'not-a-number' })
+
+  const out = collect()
+  await runStatus({}, {
+    configDir, log: out.log,
+    connect: async () => fakeClient(), disconnect: async () => {},
+  })
+
+  assert.match(out.text(), /Sho \(@shovity\)/)
+  assert.match(out.text(), /1 restore/)
 })

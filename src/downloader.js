@@ -43,7 +43,10 @@ async function readExactly(fd, length, position) {
 // the better check anyway: a slice written at the wrong offset, two slices overlapping, or
 // one silently skipped all show up here. It does not prove the bytes reached the platter —
 // this read may well be served from the page cache — it proves the assembly.
-async function hashRange(fd, offset, length) {
+//
+// Exported because a resumed restore asks the same question of a .partial left by an earlier
+// run. A second copy of it in restore.js is how two definitions of one check start to differ.
+export async function hashRange(fd, offset, length) {
   const hash = createHash('sha256')
 
   for (let at = 0; at < length; at += HASH_READ_SIZE) {

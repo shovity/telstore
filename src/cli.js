@@ -36,7 +36,7 @@ Usage:
   npx telstore list                       List the backups stored in the destination
   npx telstore restore <backup-id>...     Download the chunks and reassemble the files
   npx telstore delete <backup-id>...      Remove backups' chunks and manifests from the chat
-  npx telstore status                     Show the account, the destination and unfinished backups
+  npx telstore status                     Show the account, the destination and unfinished uploads and restores
   npx telstore config                     Show every setting and where its value comes from
   npx telstore logout                     Remove the saved session
 
@@ -120,8 +120,38 @@ export function interruptMessage(command, { backupId, done = [] } = {}) {
     )
   }
 
+  // A restore keeps its .partial now, and the next run proves each chunk in it against the
+  // manifest before trusting a byte — so "running again starts over", which this said while
+  // there was nothing to resume from, would now be false.
   if (command === 'restore') {
-    return '\nStopped. Download progress is not saved, running again starts over.\n'
+    // Finished ids have been renamed to their real names and their records removed, so
+    // repeating the whole command line would meet an overwrite prompt and then download
+    // them again from nothing. Name them and ask for the rest, exactly as a batch upload does.
+    if (done.length > 0) {
+      const width = Math.max(...done.map((item) => basename(item.path).length))
+      const finished = done
+        .map((item) => `  ${basename(item.path).padEnd(width)}  ${item.id}`)
+        .join('\n')
+
+      return (
+        `\nStopped. These are finished and need no second run:\n${finished}\n` +
+        'Run telstore again with only the ids that are left — their .partial files are kept, ' +
+        'so those carry on where they stopped. "npx telstore status" shows what is unfinished.\n'
+      )
+    }
+
+    // With onBackupId firing only once the .partial is open, an id here means there is a
+    // file to carry on from. Without one, this run stopped before it wrote anything, and
+    // saying a .partial was kept would be the same lie this message was rewritten to stop
+    // telling — just from the other side.
+    if (!backupId) {
+      return '\nStopped before anything was written. Run the same command again to start.\n'
+    }
+
+    return (
+      `\nBackup ${backupId} kept its .partial file — run the same command again from this ` +
+      'directory to carry on, or "npx telstore status" to see what is left.\n'
+    )
   }
 
   // A delete has already destroyed messages for good by the time Ctrl-C lands, and the

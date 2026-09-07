@@ -1,6 +1,7 @@
 const UNITS = ['B', 'KB', 'MB', 'GB', 'TB']
 
 export function formatBytes(n) {
+  if (!Number.isFinite(n)) return '--'
   if (n < 1024) return `${n} B`
 
   let value = n

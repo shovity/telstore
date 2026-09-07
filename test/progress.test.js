@@ -13,6 +13,13 @@ test('formatBytes picks a sensible unit', () => {
   assert.equal(formatBytes(1024 ** 4), '1.0 TB')
 })
 
+test('formatBytes guards against a non-numeric size the way formatDuration does', () => {
+  assert.equal(formatBytes('not-a-number'), '--')
+  assert.equal(formatBytes(NaN), '--')
+  assert.equal(formatBytes(undefined), '--')
+  assert.equal(formatBytes(0), '0 B')
+})
+
 test('formatDuration is human readable', () => {
   assert.equal(formatDuration(0), '0s')
   assert.equal(formatDuration(45), '45s')

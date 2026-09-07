@@ -15,6 +15,14 @@ import {
   MAX_STATES,
   findStates,
   canResume,
+  restoreKey,
+  restoreFile,
+  loadRestore,
+  saveRestore,
+  clearRestore,
+  listRestores,
+  pruneRestores,
+  MAX_RESTORES,
 } from '../src/state.js'
 
 import { tempDir } from './helpers.js'
@@ -305,4 +313,110 @@ test('canResume refuses a damaged path rather than throwing', async () => {
   const state = sampleState({ path: null })
 
   assert.deepEqual(await canResume('k1', state), { ok: false, reason: 'unreadable' })
+})
+
+function sampleRestore(overrides = {}) {
+  return {
+    v: 1,
+    id: 'telstore-20260901-7c1b40',
+    target: '/home/ai/out.tar',
+    chat: '@my_backups',
+    size: 1000,
+    chunks: 3,
+    done: 1,
+    ...overrides,
+  }
+}
+
+test('restoreKey is stable and does not collide with an upload key', async () => {
+  const a = restoreKey('telstore-20260901-7c1b40', '/home/ai/out.tar')
+  const b = restoreKey('telstore-20260901-7c1b40', '/home/ai/out.tar')
+
+  assert.equal(a, b)
+  assert.match(a, /^[0-9a-f]{40}$/)
+  assert.notEqual(a, restoreKey('telstore-20260901-7c1b40', '/home/ai/other.tar'))
+})
+
+test('a restore record round-trips, and a missing one reads as null', async () => {
+  const configDir = await tempDir('state')
+  const key = restoreKey('telstore-20260901-7c1b40', '/home/ai/out.tar')
+
+  assert.equal(await loadRestore(key, configDir), null)
+
+  await saveRestore(key, sampleRestore(), configDir)
+
+  assert.deepEqual(await loadRestore(key, configDir), sampleRestore())
+})
+
+test('clearRestore removes the record and ignores one that is not there', async () => {
+  const configDir = await tempDir('state')
+  const key = restoreKey('telstore-20260901-7c1b40', '/home/ai/out.tar')
+
+  await saveRestore(key, sampleRestore(), configDir)
+  await clearRestore(key, configDir)
+  await clearRestore(key, configDir)
+
+  assert.equal(await loadRestore(key, configDir), null)
+})
+
+test('the two record kinds are invisible to each other', async () => {
+  const configDir = await tempDir('state')
+
+  await saveState(stateKey('/home/ai/data.tar', 100, 1757000000000), sampleState(), configDir)
+  await saveRestore(restoreKey('telstore-20260901-7c1b40', '/home/ai/out.tar'), sampleRestore(), configDir)
+
+  const uploads = await listStates(configDir)
+  const restores = await listRestores(configDir)
+
+  assert.equal(uploads.length, 1)
+  assert.equal(uploads[0].state.path, '/home/ai/data.tar')
+  assert.equal(restores.length, 1)
+  assert.equal(restores[0].record.target, '/home/ai/out.tar')
+})
+
+test('a restore record is skipped when it cannot say what it is about', async () => {
+  const configDir = await tempDir('state')
+  const key = restoreKey('telstore-20260901-7c1b40', '/home/ai/out.tar')
+
+  await saveRestore(key, { v: 1, done: 2 }, configDir)
+
+  assert.deepEqual(await listRestores(configDir), [])
+})
+
+test('pruning uploads never evicts a restore, and the reverse', async () => {
+  const configDir = await tempDir('state')
+
+  for (let i = 0; i < MAX_STATES + 3; i += 1) {
+    await saveState(stateKey(`/home/ai/f${i}.tar`, i, i), sampleState({ id: `up-${i}` }), configDir)
+  }
+
+  for (let i = 0; i < 4; i += 1) {
+    await saveRestore(restoreKey(`telstore-r${i}`, `/home/ai/o${i}.tar`), sampleRestore({ id: `re-${i}` }), configDir)
+  }
+
+  await pruneStates(configDir)
+
+  assert.equal((await listStates(configDir)).length, MAX_STATES)
+  assert.equal((await listRestores(configDir)).length, 4)
+
+  for (let i = 0; i < MAX_RESTORES + 2; i += 1) {
+    await saveRestore(restoreKey(`telstore-x${i}`, `/home/ai/x${i}.tar`), sampleRestore({ id: `x-${i}` }), configDir)
+  }
+
+  await pruneRestores(configDir)
+
+  assert.equal((await listRestores(configDir)).length, MAX_RESTORES)
+  assert.equal((await listStates(configDir)).length, MAX_STATES)
+})
+
+test('listStates reports when each record last made progress', async () => {
+  const configDir = await tempDir('state')
+  const key = stateKey('/home/ai/data.tar', 100, 1757000000000)
+
+  await saveState(key, sampleState(), configDir)
+
+  const [entry] = await listStates(configDir)
+
+  assert.equal(typeof entry.mtimeMs, 'number')
+  assert.ok(entry.mtimeMs > 0)
 })

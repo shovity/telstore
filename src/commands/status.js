@@ -1,3 +1,5 @@
+import { promises as fs } from 'node:fs'
+
 import { countChunks } from '../chunking.js'
 import { describeChat } from '../chat.js'
 import { closeQuietly, connect as realConnect } from '../client.js'
@@ -5,7 +7,7 @@ import { configFile, defaultConfigDir, loadConfig } from '../config.js'
 import { formatBytes } from '../progress.js'
 import { assertLoggedIn } from '../session.js'
 import { resolveSettings } from '../settings.js'
-import { canResume, listStates } from '../state.js'
+import { canResume, listRestores, listStates } from '../state.js'
 
 const LABEL_WIDTH = 'Destination'.length + 2
 
@@ -52,6 +54,15 @@ const NO_RESUME = {
   unreadable: 'the record does not name a file that can be read',
 }
 
+// Why the .partial cannot be resumed from, in the same spirit as NO_RESUME above: an
+// EACCES or an ELOOP is not the same fact as the file being gone, and telling the user
+// their multi-gigabyte download vanished when it is sitting there, unreadable, sends them
+// looking for the wrong problem.
+const NO_PARTIAL_RESUME = {
+  missing: 'the partial download is no longer there',
+  unreadable: 'the partial download cannot be read',
+}
+
 // A command is printed only when it will really resume. Printing one regardless would be
 // telling the user to run something that quietly starts a second backup and abandons every
 // chunk this one already sent — and those chunks are then findable only by this id, which
@@ -71,6 +82,44 @@ async function resumeLines(key, state, destination, done) {
   }
 
   return lines
+}
+
+// The record holds an absolute target, and printing it is what makes the pasted line
+// correct. Without --out, runRestore resolves the manifest's own name against the current
+// directory — a name status does not have (it is in a manifest on Telegram, and status
+// reaches Telegram only for the account line, where it deliberately tolerates failure) and
+// a directory status cannot assume. A command pasted from elsewhere would resolve to
+// another path, miss the .partial and start over, which is the failure resume exists to end.
+function restoreCommand(record, destination) {
+  const matches = destination !== null && record.chat === String(destination)
+  const chat = matches ? '' : ` --chat ${shellArg(record.chat)}`
+
+  return `npx telstore restore ${shellArg(record.id)} --out ${shellArg(record.target)}${chat}`
+}
+
+// The .partial is the whole reason a resume is possible, so its absence is the one thing
+// worth checking before offering a command that would silently start over.
+async function restoreResumeLine(record, destination) {
+  try {
+    await fs.stat(`${record.target}.partial`)
+  } catch (err) {
+    const reason = err.code === 'ENOENT' ? 'missing' : 'unreadable'
+
+    return field('Resume', `not possible: ${NO_PARTIAL_RESUME[reason]}.`)
+  }
+
+  return field('Resume', restoreCommand(record, destination))
+}
+
+// Only the kinds actually present are named. "N backups" fits an upload and not a restore:
+// there the backup is finished and sitting in the chat, and it is the restore that stopped.
+function unfinishedCount(uploads, restores) {
+  const parts = []
+
+  if (uploads > 0) parts.push(`${uploads} upload${uploads === 1 ? '' : 's'}`)
+  if (restores > 0) parts.push(`${restores} restore${restores === 1 ? '' : 's'}`)
+
+  return parts.length === 0 ? 'none' : parts.join(', ')
 }
 
 function describeAccount(me) {
@@ -153,24 +202,42 @@ export async function runStatus(options = {}, deps = {}) {
     ),
   )
 
-  const states = await listStates(configDir)
+  const uploads = await listStates(configDir)
+  const restores = await listRestores(configDir)
 
-  if (states.length === 0) {
-    log(row('Unfinished', 'none'))
-    return
-  }
+  log(row('Unfinished', unfinishedCount(uploads.length, restores.length)))
 
-  log(row('Unfinished', `${states.length} backup${states.length === 1 ? '' : 's'}`))
+  if (uploads.length === 0 && restores.length === 0) return
 
-  // The destination is what decides whether the resume command needs a --chat. A row that
+  // The destination is what decides whether a resume command needs a --chat. A row that
   // failed to parse leaves nothing to compare against, which is not the same as a match.
   const destination = settings?.chat ?? null
 
-  for (const { key, state } of states) {
+  // Newest first, by when the record last changed — which is when that transfer last made
+  // progress, and the same ordering pruneStates already means by "recent".
+  const entries = [
+    ...uploads.map((entry) => ({ ...entry, kind: 'upload' })),
+    ...restores.map((entry) => ({ ...entry, kind: 'restore' })),
+  ].sort((a, b) => b.mtimeMs - a.mtimeMs)
+
+  for (const entry of entries) {
+    log('')
+
+    if (entry.kind === 'restore') {
+      const { record } = entry
+
+      log(`  ${record.id}`)
+      log(field('File', `${record.target}  (${formatBytes(record.size)})`))
+      log(field('Chunks', `${record.done ?? 0} of ${record.chunks ?? '?'} restored`))
+      log(field('Chat', describeChat(record.chat)))
+      log(await restoreResumeLine(record, destination))
+      continue
+    }
+
+    const { key, state } = entry
     const total = countChunks(state.size, state.chunkSize)
     const done = Object.keys(state.done ?? {}).length
 
-    log('')
     log(`  ${state.id}`)
     log(field('File', `${state.path}  (${formatBytes(state.size)})`))
     log(field('Chunks', `${done} of ${total} uploaded`))

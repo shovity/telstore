@@ -16,14 +16,70 @@ export function stateFile(key, configDir = defaultConfigDir()) {
   return path.join(stateDir(configDir), `${key}.json`)
 }
 
-export async function loadState(key, configDir = defaultConfigDir()) {
+// A restore's record is filed beside the uploads and must never compete with them for a
+// prune slot. Losing an upload record strands chunks in a chat where only the id can still
+// find them, which is why pruneStates reads each file back to name what it drops; losing a
+// restore record costs one line of `status` for a .partial that still resumes perfectly.
+// The name is what keeps them apart — an upload key is 40 hex characters and `r` is not
+// hex, so the two namespaces cannot collide.
+const RESTORE_PREFIX = 'restore-'
+
+// stateKey's trick does not transfer: a .partial changes size and mtime on every write, so
+// there is nothing there to key on. What holds still across runs is the backup being
+// restored and the path being written.
+export function restoreKey(backupId, absTarget) {
+  return createHash('sha1').update(`${backupId}:${absTarget}`).digest('hex')
+}
+
+export function restoreFile(key, configDir = defaultConfigDir()) {
+  return path.join(stateDir(configDir), `${RESTORE_PREFIX}${key}.json`)
+}
+
+// One reader for both kinds. A listing that forgets to filter hands `status` a restore
+// record as though it were an upload, canResume stats a path that is not in it, and the
+// report comes out wrong without anything failing — so there is one place that filters.
+async function recordNames(configDir, restores) {
+  let names
   try {
-    return JSON.parse(await fs.readFile(stateFile(key, configDir), 'utf8'))
+    names = await fs.readdir(stateDir(configDir))
+  } catch (err) {
+    if (err.code === 'ENOENT') return []
+    throw err
+  }
+
+  return names.filter(
+    (name) => name.endsWith('.json') && name.startsWith(RESTORE_PREFIX) === restores,
+  )
+}
+
+function keyOfName(name) {
+  const base = name.slice(0, -'.json'.length)
+
+  return base.startsWith(RESTORE_PREFIX) ? base.slice(RESTORE_PREFIX.length) : base
+}
+
+// Why loadState returns null rather than throwing, in one place both kinds can use: one
+// corrupt file must not hide the other records still waiting to be finished.
+async function readRecord(file) {
+  try {
+    return JSON.parse(await fs.readFile(file, 'utf8'))
   } catch (err) {
     if (err.code === 'ENOENT') return null
     if (err instanceof SyntaxError) return null
     throw err
   }
+}
+
+async function removeRecord(file) {
+  try {
+    await fs.unlink(file)
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw err
+  }
+}
+
+export async function loadState(key, configDir = defaultConfigDir()) {
+  return await readRecord(stateFile(key, configDir))
 }
 
 export async function saveState(key, state, configDir = defaultConfigDir()) {
@@ -37,11 +93,19 @@ export async function markChunkDone(key, state, i, entry, configDir = defaultCon
 }
 
 export async function clearState(key, configDir = defaultConfigDir()) {
-  try {
-    await fs.unlink(stateFile(key, configDir))
-  } catch (err) {
-    if (err.code !== 'ENOENT') throw err
-  }
+  await removeRecord(stateFile(key, configDir))
+}
+
+export async function loadRestore(key, configDir = defaultConfigDir()) {
+  return await readRecord(restoreFile(key, configDir))
+}
+
+export async function saveRestore(key, record, configDir = defaultConfigDir()) {
+  await writeJsonAtomic(restoreFile(key, configDir), record)
+}
+
+export async function clearRestore(key, configDir = defaultConfigDir()) {
+  await removeRecord(restoreFile(key, configDir))
 }
 
 // A state file is only useful while its backup can still be resumed, and nothing ever
@@ -54,24 +118,14 @@ export const MAX_STATES = 20
 // were dropped: the caller says their ids out loud, because after this the id is the only
 // way left to find those chunks in the chat.
 export async function pruneStates(configDir = defaultConfigDir(), keep = MAX_STATES) {
-  let names
-  try {
-    names = await fs.readdir(stateDir(configDir))
-  } catch (err) {
-    if (err.code === 'ENOENT') return []
-    throw err
-  }
-
   const files = []
 
-  for (const name of names) {
-    if (!name.endsWith('.json')) continue
-
+  for (const name of await recordNames(configDir, false)) {
     const file = path.join(stateDir(configDir), name)
 
     try {
       const stat = await fs.stat(file)
-      files.push({ key: name.slice(0, -'.json'.length), file, mtimeMs: stat.mtimeMs })
+      files.push({ key: keyOfName(name), file, mtimeMs: stat.mtimeMs })
     } catch (err) {
       // Gone between readdir and stat: nothing left to prune.
       if (err.code !== 'ENOENT') throw err
@@ -99,25 +153,24 @@ export async function pruneStates(configDir = defaultConfigDir(), keep = MAX_STA
 //
 // The key comes back alongside each record because canResume needs it, and the file name is
 // the only place it survives: the record's own path, size and mtime are exactly what a
-// rewritten file makes stale, so recomputing the key from them would always say yes.
+// rewritten file makes stale, so recomputing the key from them would always say yes. The
+// mtime comes back because it is when this backup last made progress, which is the order
+// status prints records in.
 export async function listStates(configDir = defaultConfigDir()) {
-  let names
-  try {
-    names = await fs.readdir(stateDir(configDir))
-  } catch (err) {
-    if (err.code === 'ENOENT') return []
-    throw err
-  }
-
   const states = []
 
-  for (const name of names) {
-    if (!name.endsWith('.json')) continue
-
-    const key = name.slice(0, -'.json'.length)
+  for (const name of await recordNames(configDir, false)) {
+    const key = keyOfName(name)
     const state = await loadState(key, configDir)
 
-    if (state) states.push({ key, state })
+    if (!state) continue
+
+    try {
+      const { mtimeMs } = await fs.stat(path.join(stateDir(configDir), name))
+      states.push({ key, state, mtimeMs })
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err
+    }
   }
 
   return states
@@ -134,20 +187,10 @@ export async function listStates(configDir = defaultConfigDir()) {
 // cannot know which to drop, and that is the caller's decision to refuse, not ours to make
 // by picking one.
 export async function findStates(backupId, configDir = defaultConfigDir()) {
-  let names
-  try {
-    names = await fs.readdir(stateDir(configDir))
-  } catch (err) {
-    if (err.code === 'ENOENT') return []
-    throw err
-  }
-
   const found = []
 
-  for (const name of names) {
-    if (!name.endsWith('.json')) continue
-
-    const key = name.slice(0, -'.json'.length)
+  for (const name of await recordNames(configDir, false)) {
+    const key = keyOfName(name)
     const state = await loadState(key, configDir)
 
     if (state?.id === backupId) found.push({ key, file: stateFile(key, configDir), state })
@@ -179,4 +222,53 @@ export async function canResume(key, state) {
   if (stateKey(state.path, stat.size, stat.mtimeMs) !== key) return { ok: false, reason: 'changed' }
 
   return { ok: true }
+}
+
+export const MAX_RESTORES = 20
+
+// A record with no id or no target can neither be printed nor resumed from, so status has
+// nothing to do with it. Skipped rather than rendered with blanks: these files are
+// hand-editable, and a row that names nothing is worse than no row.
+export async function listRestores(configDir = defaultConfigDir()) {
+  const restores = []
+
+  for (const name of await recordNames(configDir, true)) {
+    const key = keyOfName(name)
+    const record = await loadRestore(key, configDir)
+
+    if (typeof record?.id !== 'string' || typeof record?.target !== 'string') continue
+
+    try {
+      const { mtimeMs } = await fs.stat(path.join(stateDir(configDir), name))
+      restores.push({ key, record, mtimeMs })
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err
+    }
+  }
+
+  return restores
+}
+
+// Unlike pruneStates this returns nothing and reads nothing back. Dropping a restore record
+// strands no data — the .partial it points at still resumes, because the evidence for a
+// resume was never in the record — so there is nothing to announce and no reason to open
+// each file just to name it. It removes the signpost, never the .partial: a multi-gigabyte
+// file must not disappear as a side effect of starting an unrelated restore.
+export async function pruneRestores(configDir = defaultConfigDir(), keep = MAX_RESTORES) {
+  const files = []
+
+  for (const name of await recordNames(configDir, true)) {
+    const file = path.join(stateDir(configDir), name)
+
+    try {
+      const stat = await fs.stat(file)
+      files.push({ file, mtimeMs: stat.mtimeMs })
+    } catch (err) {
+      if (err.code !== 'ENOENT') throw err
+    }
+  }
+
+  files.sort((a, b) => b.mtimeMs - a.mtimeMs)
+
+  for (const { file } of files.slice(keep)) await removeRecord(file)
 }

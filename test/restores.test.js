@@ -246,3 +246,70 @@ test('a failing id is named the moment it fails, not only in the summary', async
   assert.notEqual(failure, -1)
   assert.ok(failure < nextId, 'the failure must be reported before the next id starts')
 })
+
+test('a batch reports each id as it finishes', async () => {
+  const chat = fakeChat(['a.tar', 'b.tar'])
+  const { dir, configDir } = await workspace()
+  const cwd = process.cwd()
+  const finished = []
+
+  // No --out in a batch: each file is named by its own manifest, in the current directory.
+  process.chdir(dir)
+
+  try {
+    await runRestores(chat.ids, {}, {
+      ...deps(chat, configDir),
+      onRestoreDone: (item) => finished.push(item),
+    })
+  } finally {
+    process.chdir(cwd)
+  }
+
+  assert.deepEqual(finished.map((item) => item.id), chat.ids)
+  assert.deepEqual(finished.map((item) => path.basename(item.path)), ['a.tar', 'b.tar'])
+})
+
+test('a batch reaches onBackupId for each id, so Ctrl-C can name whichever is in flight', async () => {
+  const chat = fakeChat(['a.tar', 'b.tar'])
+  const { dir, configDir } = await workspace()
+  const cwd = process.cwd()
+  const seen = []
+
+  process.chdir(dir)
+
+  try {
+    await runRestores(chat.ids, {}, {
+      ...deps(chat, configDir),
+      onBackupId: (id) => seen.push(id),
+    })
+  } finally {
+    process.chdir(cwd)
+  }
+
+  // Cleared back to null after each id finishes, so a Ctrl-C while the next id is still
+  // connecting or blocked at the overwrite prompt does not go on naming the previous one.
+  assert.deepEqual(seen, [chat.ids[0], null, chat.ids[1], null])
+})
+
+test('onBackupId is cleared even when an id in the batch fails', async () => {
+  const chat = fakeChat(['a.tar', 'b.tar'])
+  const { dir, configDir } = await workspace()
+  const cwd = process.cwd()
+  const seen = []
+
+  process.chdir(dir)
+
+  try {
+    await runRestores(chat.ids, {}, {
+      ...deps(chat, configDir),
+      searchManifest: async () => null,
+      onBackupId: (id) => seen.push(id),
+    })
+  } finally {
+    process.chdir(cwd)
+  }
+
+  // Neither id ever opens a .partial (searchManifest finds nothing), so onBackupId is
+  // never told an id — only cleared, which must still be a no-op on an already-null value.
+  assert.deepEqual(seen, [null, null])
+})
