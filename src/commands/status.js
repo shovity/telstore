@@ -216,7 +216,7 @@ export async function runStatus(options = {}, deps = {}) {
       const { record } = entry
 
       log(`  ${record.id}`)
-      log(field('File', `${record.target}  (${formatBytes(record.size ?? 0)})`))
+      log(field('File', `${record.target}  (${formatBytes(Number.isFinite(record.size) ? record.size : 0)})`))
       log(field('Chunks', `${record.done ?? 0} of ${record.chunks ?? '?'} restored`))
       log(field('Chat', describeChat(record.chat)))
       log(await restoreResumeLine(record, destination))

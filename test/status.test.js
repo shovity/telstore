@@ -500,3 +500,25 @@ test('a restore record that will not parse does not take the report down', async
   assert.match(out.text(), /Sho \(@shovity\)/)
   assert.match(out.text(), /1 restore/)
 })
+
+test('a restore record with a damaged size does not take the report down', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+
+  const dir = await tempDir('status-target')
+  const target = path.join(dir, 'out.tar')
+  await fs.writeFile(`${target}.partial`, 'x')
+
+  // Parses, reaches the renderer, and carries a field the renderer does arithmetic on.
+  // The unparseable-JSON test above never gets this far: readRecord drops it first.
+  await savedRestore(configDir, { target, size: 'not-a-number' })
+
+  const out = collect()
+  await runStatus({}, {
+    configDir, log: out.log,
+    connect: async () => fakeClient(), disconnect: async () => {},
+  })
+
+  assert.match(out.text(), /Sho \(@shovity\)/)
+  assert.match(out.text(), /1 restore/)
+})
