@@ -78,6 +78,20 @@ async function removeRecord(file) {
   }
 }
 
+// The mtime says when a record last made progress, which is the order `status` prints in —
+// nothing decides from it whether a record exists. Its content has already been read by the
+// time this runs, so a stat that fails must not drop the record or take the listing down:
+// an unknown time sorts last and nothing is hidden. The file can genuinely vanish between
+// the readdir and here, which is the case this exists for.
+async function recordMtime(file) {
+  try {
+    const { mtimeMs } = await fs.stat(file)
+    return mtimeMs
+  } catch {
+    return 0
+  }
+}
+
 export async function loadState(key, configDir = defaultConfigDir()) {
   return await readRecord(stateFile(key, configDir))
 }
@@ -165,12 +179,7 @@ export async function listStates(configDir = defaultConfigDir()) {
 
     if (!state) continue
 
-    try {
-      const { mtimeMs } = await fs.stat(path.join(stateDir(configDir), name))
-      states.push({ key, state, mtimeMs })
-    } catch (err) {
-      if (err.code !== 'ENOENT') throw err
-    }
+    states.push({ key, state, mtimeMs: await recordMtime(path.join(stateDir(configDir), name)) })
   }
 
   return states
@@ -238,12 +247,7 @@ export async function listRestores(configDir = defaultConfigDir()) {
 
     if (typeof record?.id !== 'string' || typeof record?.target !== 'string') continue
 
-    try {
-      const { mtimeMs } = await fs.stat(path.join(stateDir(configDir), name))
-      restores.push({ key, record, mtimeMs })
-    } catch (err) {
-      if (err.code !== 'ENOENT') throw err
-    }
+    restores.push({ key, record, mtimeMs: await recordMtime(path.join(stateDir(configDir), name)) })
   }
 
   return restores
@@ -271,4 +275,24 @@ export async function pruneRestores(configDir = defaultConfigDir(), keep = MAX_R
   files.sort((a, b) => b.mtimeMs - a.mtimeMs)
 
   for (const { file } of files.slice(keep)) await removeRecord(file)
+}
+
+// What findStates is for uploads, and for the same reason: the file name hashes the target
+// path, which delete does not know — it has an id and nothing else. Matching the id inside
+// each file is the only way that cannot point at the wrong one.
+//
+// Every record claiming the id comes back, not the first. One backup restored to two places
+// is two records, and a delete that drops one of them leaves a signpost to chunks that are
+// no longer in the chat.
+export async function findRestores(backupId, configDir = defaultConfigDir()) {
+  const found = []
+
+  for (const name of await recordNames(configDir, true)) {
+    const key = keyOfName(name)
+    const record = await loadRestore(key, configDir)
+
+    if (record?.id === backupId) found.push({ key, file: restoreFile(key, configDir), record })
+  }
+
+  return found
 }

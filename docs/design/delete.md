@@ -19,3 +19,12 @@ removed that the user did not ask for, nothing reported gone that is still there
   `withRetry` nor the stall deadline. Its peer resolution and its choice between
   `channels.DeleteMessages` and `messages.DeleteMessages` are still what telstore calls,
   because that choice is what a fake client would never catch us getting wrong.
+- A delete also drops every `restore-*` record naming that backup, next to where it drops the
+  upload record and for the same reason: the chunks are gone, so `status` would go on offering
+  a resume command that can only fail. `findRestores` matches the id *inside* each file, like
+  `findStates` — the file name hashes the target path, which delete never knows. Every record
+  claiming the id goes, not the first: one backup restored to two places is two records.
+  What does **not** go is the `.partial` itself. It is the user's data, sometimes gigabytes of
+  it, and this command removes what was asked for and nothing else — the same line `pruneRestores`
+  will not cross. It is named on the way out instead, because nothing can finish it now, and a
+  file nobody is told about is one nobody will ever think to reclaim.
