@@ -1,3 +1,5 @@
+import { promises as fs } from 'node:fs'
+
 import { chatName, describeChat } from '../chat.js'
 import {
   DELETE_BATCH_SIZE,
@@ -13,7 +15,7 @@ import { manifestFileName, manifestMessageIds, parseManifestJson } from '../mani
 import { formatBytes, formatDuration } from '../progress.js'
 import { assertLoggedIn } from '../session.js'
 import { requireChat, resolveSettings } from '../settings.js'
-import { clearState, findStates } from '../state.js'
+import { clearRestore, clearState, findRestores, findStates } from '../state.js'
 
 // What list prints when a card cannot be read back. A manifest is text off a chat, and a
 // summary is not worth inventing: the numbers below only decorate a decision the backup id
@@ -223,6 +225,30 @@ export async function runDelete(backupId, options = {}, deps = {}) {
 
     if (record) await clearState(record.key, configDir)
 
+    // The chunks are gone from the chat, so a restore record pointing at this backup now
+    // names messages nobody can fetch: `status` would keep offering a resume command that
+    // can only fail. Dropped here rather than earlier for the same reason the upload record
+    // is — anything that throws above leaves the way back intact.
+    //
+    // The .partial itself stays. It is the user's data, sometimes gigabytes of it, and this
+    // command removes what was asked for and nothing else. But it can never be completed
+    // now, so it is named on the way out: that is the difference between a file they can
+    // reclaim and one they will never think to look for.
+    const stranded = []
+
+    for (const found of await findRestores(backupId, configDir)) {
+      await clearRestore(found.key, configDir)
+
+      const partial = `${found.record.target}.partial`
+
+      try {
+        await fs.stat(partial)
+        stranded.push(partial)
+      } catch {
+        // Nothing there to tell them about.
+      }
+    }
+
     if (manifestMessage) {
       log(
         `\nDone. Removed ${backupId} from ${chatName(chat)}: ` +
@@ -233,6 +259,13 @@ export async function runDelete(backupId, options = {}, deps = {}) {
       log(
         `\nDone. Removed ${plural(chunkIds.length, 'chunk message')} from ${chatName(chat)} ` +
           `and dropped the local record of ${backupId}.`,
+      )
+    }
+
+    for (const partial of stranded) {
+      log(
+        `${partial} is a half-finished restore of this backup. Nothing can finish it now — ` +
+          'delete it when you want the space back.',
       )
     }
 

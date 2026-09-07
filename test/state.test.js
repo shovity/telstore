@@ -14,6 +14,7 @@ import {
   pruneStates,
   MAX_STATES,
   findStates,
+  findRestores,
   canResume,
   restoreKey,
   restoreFile,
@@ -419,4 +420,43 @@ test('listStates reports when each record last made progress', async () => {
 
   assert.equal(typeof entry.mtimeMs, 'number')
   assert.ok(entry.mtimeMs > 0)
+})
+
+test('findRestores returns every record claiming an id, and none claiming another', async () => {
+  const configDir = await tempDir('state')
+
+  // The same backup restored to two places is two records, and delete has to drop both:
+  // leaving one behind is a signpost to a backup that is no longer there.
+  await saveRestore(
+    restoreKey('telstore-a', '/home/ai/one.tar'),
+    sampleRestore({ id: 'telstore-a', target: '/home/ai/one.tar' }),
+    configDir,
+  )
+  await saveRestore(
+    restoreKey('telstore-a', '/home/ai/two.tar'),
+    sampleRestore({ id: 'telstore-a', target: '/home/ai/two.tar' }),
+    configDir,
+  )
+  await saveRestore(
+    restoreKey('telstore-b', '/home/ai/three.tar'),
+    sampleRestore({ id: 'telstore-b', target: '/home/ai/three.tar' }),
+    configDir,
+  )
+
+  const found = await findRestores('telstore-a', configDir)
+
+  assert.deepEqual(
+    found.map((entry) => entry.record.target).sort(),
+    ['/home/ai/one.tar', '/home/ai/two.tar'],
+  )
+  assert.ok(found.every((entry) => entry.file.endsWith('.json')))
+  assert.deepEqual(await findRestores('telstore-none', configDir), [])
+})
+
+test('findRestores ignores upload records with the same id', async () => {
+  const configDir = await tempDir('state')
+
+  await saveState(stateKey('/home/ai/data.tar', 1, 1), sampleState({ id: 'telstore-a' }), configDir)
+
+  assert.deepEqual(await findRestores('telstore-a', configDir), [])
 })

@@ -5,7 +5,7 @@ import { promises as fs } from 'node:fs'
 import { runDelete } from '../src/commands/delete.js'
 import { saveConfig } from '../src/config.js'
 import { buildManifest, manifestFileName, serializeManifest } from '../src/manifest.js'
-import { saveState, stateDir } from '../src/state.js'
+import { findRestores, restoreKey, saveRestore, saveState, stateDir } from '../src/state.js'
 import { LOGGED_IN, collect, tempDir } from './helpers.js'
 
 const ID = 'telstore-20260905-7f3a91'
@@ -452,4 +452,67 @@ test('the connection is closed even when the delete fails', async () => {
   )
 
   assert.equal(closed, true)
+})
+
+// --- a deleted backup must stop being offered as restorable --------------------------
+
+async function unfinishedRestore(configDir, { id = ID, target } = {}) {
+  await saveRestore(
+    restoreKey(id, target),
+    { v: 1, id, target, chat: '@store', size: 1200, chunks: 3, done: 1 },
+    configDir,
+  )
+}
+
+test('deleting a backup drops the restore record that pointed at it', async () => {
+  const configDir = await workspace()
+  const dir = await tempDir('delete-target')
+  const target = `${dir}/out.tar`
+  await unfinishedRestore(configDir, { target })
+
+  await runDelete(ID, {}, deps(configDir, { manifest: manifestBody(), rec: recorder() }))
+
+  assert.deepEqual(await findRestores(ID, configDir), [])
+})
+
+test('deleting a backup drops every restore record for it, not just the first', async () => {
+  const configDir = await workspace()
+  const dir = await tempDir('delete-target')
+  await unfinishedRestore(configDir, { target: `${dir}/one.tar` })
+  await unfinishedRestore(configDir, { target: `${dir}/two.tar` })
+
+  await runDelete(ID, {}, deps(configDir, { manifest: manifestBody(), rec: recorder() }))
+
+  assert.deepEqual(await findRestores(ID, configDir), [])
+})
+
+// The .partial is the user's data, not telstore's bookkeeping — delete removes what was
+// asked for and nothing else. But after this it can never be completed, so a user who is
+// not told is left with gigabytes they have no reason to look for.
+test('deleting a backup keeps the .partial and says it can never be finished', async () => {
+  const configDir = await workspace()
+  const dir = await tempDir('delete-target')
+  const target = `${dir}/out.tar`
+  await fs.writeFile(`${target}.partial`, 'half a backup')
+  await unfinishedRestore(configDir, { target })
+  const out = collect()
+
+  await runDelete(ID, {}, deps(configDir, { manifest: manifestBody(), rec: recorder(), out }))
+
+  assert.equal(await fs.readFile(`${target}.partial`, 'utf8'), 'half a backup')
+  assert.match(out.text(), new RegExp(`${target}\\.partial`))
+  assert.match(out.text(), /Nothing can finish it now/)
+  assert.match(out.text(), /delete it when you want the space back/)
+})
+
+test('a restore record whose .partial is already gone is dropped without a word about it', async () => {
+  const configDir = await workspace()
+  const dir = await tempDir('delete-target')
+  const out = collect()
+  await unfinishedRestore(configDir, { target: `${dir}/out.tar` })
+
+  await runDelete(ID, {}, deps(configDir, { manifest: manifestBody(), rec: recorder(), out }))
+
+  assert.deepEqual(await findRestores(ID, configDir), [])
+  assert.doesNotMatch(out.text(), /\.partial/)
 })

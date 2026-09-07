@@ -35,3 +35,8 @@
   and telstore renames a corrupt file into place. Re-reading also costs a thirty-fourth of
   re-downloading, so the cheap way and the safe way are the same way. Every chunk in a
   finished file was hashed against the manifest by the run that renamed it.
+- `listStates` and `listRestores` stat each record only to learn when it last made progress,
+  which is the order `status` prints in — never to decide whether the record exists, since its
+  contents have already been read by then. So a failed stat yields an unknown time that sorts
+  last rather than a dropped row or a thrown report: the file can vanish between the readdir
+  and the stat, and `status` is the command someone runs *because* something is wrong.
