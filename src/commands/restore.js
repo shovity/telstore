@@ -91,9 +91,6 @@ export async function runRestore(backupId, options = {}, deps = {}) {
     onBackupId = () => {},
   } = deps
 
-  // The id is on the command line, so Ctrl-C can name this restore from the first moment.
-  onBackupId(backupId)
-
   const config = await loadConfig(configDir)
   const { values: settings } = resolveSettings(options, config, { file: configFile(configDir) })
   const chat = requireChat(settings)
@@ -197,6 +194,10 @@ export async function runRestore(backupId, options = {}, deps = {}) {
       handle = await fs.open(partial, 'w+')
       resuming = false
     }
+
+    // The message this id feeds says a .partial was kept, so naming the id is only honest
+    // once one actually exists — before this line, Ctrl-C would have nothing to carry on from.
+    onBackupId(backupId)
 
     try {
       // Extends a short .partial with zeros and cuts an over-long one, and touches no byte

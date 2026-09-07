@@ -140,11 +140,17 @@ export function interruptMessage(command, { backupId, done = [] } = {}) {
       )
     }
 
-    const backup = backupId ? `Backup ${backupId}` : 'This restore'
+    // With onBackupId firing only once the .partial is open, an id here means there is a
+    // file to carry on from. Without one, this run stopped before it wrote anything, and
+    // saying a .partial was kept would be the same lie this message was rewritten to stop
+    // telling — just from the other side.
+    if (!backupId) {
+      return '\nStopped before anything was written. Run the same command again to start.\n'
+    }
 
     return (
-      `\n${backup} kept its .partial file — run the same command again from this directory ` +
-      'to carry on, or "npx telstore status" to see what is left.\n'
+      `\nBackup ${backupId} kept its .partial file — run the same command again from this ` +
+      'directory to carry on, or "npx telstore status" to see what is left.\n'
     )
   }
 

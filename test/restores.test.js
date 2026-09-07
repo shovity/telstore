@@ -268,3 +268,23 @@ test('a batch reports each id as it finishes', async () => {
   assert.deepEqual(finished.map((item) => item.id), chat.ids)
   assert.deepEqual(finished.map((item) => path.basename(item.path)), ['a.tar', 'b.tar'])
 })
+
+test('a batch reaches onBackupId for each id, so Ctrl-C can name whichever is in flight', async () => {
+  const chat = fakeChat(['a.tar', 'b.tar'])
+  const { dir, configDir } = await workspace()
+  const cwd = process.cwd()
+  const seen = []
+
+  process.chdir(dir)
+
+  try {
+    await runRestores(chat.ids, {}, {
+      ...deps(chat, configDir),
+      onBackupId: (id) => seen.push(id),
+    })
+  } finally {
+    process.chdir(cwd)
+  }
+
+  assert.deepEqual(seen, chat.ids)
+})

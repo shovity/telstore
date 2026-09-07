@@ -193,11 +193,12 @@ test('a batch that has finished nothing yet reads exactly like a single upload',
   assert.equal(batch, one)
 })
 
-test('interrupting a restore points at the .partial that was kept', () => {
+test('interrupting a restore before a .partial exists promises no file to resume', () => {
   const message = interruptMessage('restore')
 
-  assert.match(message, /\.partial/)
+  assert.match(message, /Stopped before anything was written/)
   assert.doesNotMatch(message, /starts over/)
+  assert.doesNotMatch(message, /\.partial/)
 })
 
 test('Ctrl-C during a restore points at the .partial that was kept', () => {
