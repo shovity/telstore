@@ -5,7 +5,7 @@ import path from 'node:path'
 
 import { runStatus } from '../src/commands/status.js'
 import { loadConfig, saveConfig } from '../src/config.js'
-import { saveState, stateKey } from '../src/state.js'
+import { restoreKey, saveRestore, saveState, stateKey } from '../src/state.js'
 
 import { LOGGED_IN, collect, tempDir } from './helpers.js'
 
@@ -381,4 +381,122 @@ test('status says when the session on this machine is sealed', async () => {
   })
 
   assert.match(out.text(), /Session\s+.*config\.json \(sealed/)
+})
+
+async function savedRestore(configDir, overrides = {}) {
+  const record = {
+    v: 1,
+    id: 'telstore-20260901-7c1b40',
+    target: '/home/ai/out.tar',
+    chat: '@my_backups',
+    size: 1000,
+    chunks: 7,
+    done: 4,
+    ...overrides,
+  }
+
+  await saveRestore(restoreKey(record.id, record.target), record, configDir)
+
+  return record
+}
+
+test('status names an unfinished restore and how to carry it on', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+
+  const dir = await tempDir('status-target')
+  const target = path.join(dir, 'out.tar')
+  await fs.writeFile(`${target}.partial`, 'x')
+  await savedRestore(configDir, { target })
+
+  const out = collect()
+  await runStatus({}, {
+    configDir, log: out.log,
+    connect: async () => fakeClient(), disconnect: async () => {},
+  })
+
+  const text = out.text()
+  assert.match(text, /1 restore/)
+  assert.match(text, /4 of 7 restored/)
+  assert.match(text, new RegExp(`npx telstore restore telstore-20260901-7c1b40 --out ${target}`))
+  assert.doesNotMatch(text, /--chat/)
+})
+
+test('a restore whose chunks are in another chat is resumed with --chat', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@somewhere_else' } }, configDir)
+
+  const dir = await tempDir('status-target')
+  const target = path.join(dir, 'out.tar')
+  await fs.writeFile(`${target}.partial`, 'x')
+  await savedRestore(configDir, { target })
+
+  const out = collect()
+  await runStatus({}, {
+    configDir, log: out.log,
+    connect: async () => fakeClient(), disconnect: async () => {},
+  })
+
+  assert.match(out.text(), /--chat @my_backups/)
+})
+
+test('a restore whose .partial is gone says so instead of offering a command', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+
+  const dir = await tempDir('status-target')
+  await savedRestore(configDir, { target: path.join(dir, 'out.tar') })
+
+  const out = collect()
+  await runStatus({}, {
+    configDir, log: out.log,
+    connect: async () => fakeClient(), disconnect: async () => {},
+  })
+
+  const text = out.text()
+  assert.match(text, /not possible: the partial download is no longer there/)
+  assert.doesNotMatch(text, /npx telstore restore/)
+})
+
+test('uploads and restores are counted separately in one line', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+
+  await saveState(stateKey('/home/ai/data.tar', 100, 1757000000000), {
+    id: 'telstore-20260905-7f3a91', chat: '@my_backups', path: '/home/ai/data.tar',
+    size: 100, mtimeMs: 1757000000000, chunkSize: 40, done: {},
+  }, configDir)
+
+  const dir = await tempDir('status-target')
+  const target = path.join(dir, 'out.tar')
+  await fs.writeFile(`${target}.partial`, 'x')
+  await savedRestore(configDir, { target })
+
+  const out = collect()
+  await runStatus({}, {
+    configDir, log: out.log,
+    connect: async () => fakeClient(), disconnect: async () => {},
+  })
+
+  assert.match(out.text(), /Unfinished\s+1 upload, 1 restore/)
+})
+
+test('a restore record that will not parse does not take the report down', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+
+  await savedRestore(configDir)
+  await fs.writeFile(
+    path.join(configDir, 'state', 'restore-deadbeef.json'),
+    '{ not json',
+  )
+
+  const out = collect()
+  await runStatus({}, {
+    configDir, log: out.log,
+    connect: async () => fakeClient(), disconnect: async () => {},
+  })
+
+  assert.match(out.text(), /Sho \(@shovity\)/)
+  assert.match(out.text(), /1 restore/)
 })
