@@ -88,7 +88,11 @@ export async function runRestore(backupId, options = {}, deps = {}) {
     writeErr = (line) => process.stderr.write(line),
     log: writeLog = (line) => console.log(line),
     silent = false,
+    onBackupId = () => {},
   } = deps
+
+  // The id is on the command line, so Ctrl-C can name this restore from the first moment.
+  onBackupId(backupId)
 
   const config = await loadConfig(configDir)
   const { values: settings } = resolveSettings(options, config, { file: configFile(configDir) })
@@ -339,6 +343,7 @@ export async function runRestores(backupIds, options = {}, deps = {}) {
     writeErr = (line) => process.stderr.write(line),
     log: writeLog = (line) => console.log(line),
     silent = false,
+    onRestoreDone = () => {},
   } = deps
 
   // One id must read exactly as it did before this existed: --out still works, the error still
@@ -397,6 +402,7 @@ export async function runRestores(backupIds, options = {}, deps = {}) {
       try {
         const { path: target, size } = await runRestore(backupId, options, perId)
         results.push({ id: backupId, path: target, size })
+        onRestoreDone({ id: backupId, path: target })
       } catch (err) {
         // A backup whose chunks are gone says nothing about the next one, and the summary at
         // the end would arrive an hour after the bar of the following id started scrolling

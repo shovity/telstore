@@ -49,3 +49,8 @@
   not the run — that broken backup is exactly what somebody is here to remove. Each `runDelete`
   then runs with `yes: true` and looks its own manifest up again: one extra search and a few KB
   per backup, in exchange for the most dangerous command in the project keeping its own flow.
+- Ctrl-C mid-batch says the same thing for restores as for uploads, for a different reason:
+  the ids that finished have been renamed to their real names and their records removed, so
+  repeating the whole command line meets an overwrite prompt and then downloads them again
+  from nothing. The ids that did not finish kept their `.partial` files and carry on where
+  they stopped, which is why the message asks for those and not for the whole line.

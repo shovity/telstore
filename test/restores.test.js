@@ -246,3 +246,25 @@ test('a failing id is named the moment it fails, not only in the summary', async
   assert.notEqual(failure, -1)
   assert.ok(failure < nextId, 'the failure must be reported before the next id starts')
 })
+
+test('a batch reports each id as it finishes', async () => {
+  const chat = fakeChat(['a.tar', 'b.tar'])
+  const { dir, configDir } = await workspace()
+  const cwd = process.cwd()
+  const finished = []
+
+  // No --out in a batch: each file is named by its own manifest, in the current directory.
+  process.chdir(dir)
+
+  try {
+    await runRestores(chat.ids, {}, {
+      ...deps(chat, configDir),
+      onRestoreDone: (item) => finished.push(item),
+    })
+  } finally {
+    process.chdir(cwd)
+  }
+
+  assert.deepEqual(finished.map((item) => item.id), chat.ids)
+  assert.deepEqual(finished.map((item) => path.basename(item.path)), ['a.tar', 'b.tar'])
+})

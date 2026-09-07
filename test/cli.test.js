@@ -193,8 +193,30 @@ test('a batch that has finished nothing yet reads exactly like a single upload',
   assert.equal(batch, one)
 })
 
-test('interrupting a restore says the download is lost', () => {
-  assert.match(interruptMessage('restore'), /starts over/)
+test('interrupting a restore points at the .partial that was kept', () => {
+  const message = interruptMessage('restore')
+
+  assert.match(message, /\.partial/)
+  assert.doesNotMatch(message, /starts over/)
+})
+
+test('Ctrl-C during a restore points at the .partial that was kept', () => {
+  const message = interruptMessage('restore', { backupId: 'telstore-20260901-7c1b40' })
+
+  assert.match(message, /telstore-20260901-7c1b40/)
+  assert.match(message, /\.partial/)
+  assert.doesNotMatch(message, /starts over/)
+})
+
+test('Ctrl-C during a batch restore names what is already finished', () => {
+  const message = interruptMessage('restore', {
+    backupId: 'telstore-b',
+    done: [{ id: 'telstore-a', path: '/home/ai/first.tar' }],
+  })
+
+  assert.match(message, /first\.tar/)
+  assert.match(message, /telstore-a/)
+  assert.match(message, /only the ids that are left/)
 })
 
 test('interrupting anything else just says it stopped', () => {

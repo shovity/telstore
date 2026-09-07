@@ -14,9 +14,9 @@ const SIGINT_EXIT_CODE = 130
 let currentCommand = null
 let currentBackupId = null
 
-// A batch clears each finished file's record as it goes, so by the time Ctrl-C lands these
-// are backups no second run should touch. Ctrl-C needs their names to say so.
-const finishedUploads = []
+// A batch clears each finished item's record as it goes, so by the time Ctrl-C lands these
+// are transfers no second run should touch. Ctrl-C needs their names to say so.
+const finished = []
 
 process.on('SIGINT', () => {
   // A passphrase prompt has stdin in raw mode, and process.exit skips readline's own cleanup.
@@ -24,7 +24,7 @@ process.on('SIGINT', () => {
   if (process.stdin.isTTY) process.stdin.setRawMode(false)
 
   process.stderr.write(
-    interruptMessage(currentCommand, { backupId: currentBackupId, done: finishedUploads }),
+    interruptMessage(currentCommand, { backupId: currentBackupId, done: finished }),
   )
   process.exit(SIGINT_EXIT_CODE)
 })
@@ -104,7 +104,7 @@ async function main() {
           currentBackupId = id
         },
         onFileDone: (file) => {
-          if (file.id) finishedUploads.push(file)
+          if (file.id) finished.push(file)
         },
       })
 
@@ -121,7 +121,14 @@ async function main() {
 
       const { runRestores } = await import('../src/commands/restore.js')
 
-      const { failed } = await runRestores(parsed.args, parsed.options)
+      const { failed } = await runRestores(parsed.args, parsed.options, {
+        onBackupId: (id) => {
+          currentBackupId = id
+        },
+        onRestoreDone: (item) => {
+          finished.push(item)
+        },
+      })
 
       if (failed > 0) process.exitCode = 1
       return

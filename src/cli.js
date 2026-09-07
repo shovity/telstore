@@ -120,8 +120,32 @@ export function interruptMessage(command, { backupId, done = [] } = {}) {
     )
   }
 
+  // A restore keeps its .partial now, and the next run proves each chunk in it against the
+  // manifest before trusting a byte — so "running again starts over", which this said while
+  // there was nothing to resume from, would now be false.
   if (command === 'restore') {
-    return '\nStopped. Download progress is not saved, running again starts over.\n'
+    // Finished ids have been renamed to their real names and their records removed, so
+    // repeating the whole command line would meet an overwrite prompt and then download
+    // them again from nothing. Name them and ask for the rest, exactly as a batch upload does.
+    if (done.length > 0) {
+      const width = Math.max(...done.map((item) => basename(item.path).length))
+      const finished = done
+        .map((item) => `  ${basename(item.path).padEnd(width)}  ${item.id}`)
+        .join('\n')
+
+      return (
+        `\nStopped. These are finished and need no second run:\n${finished}\n` +
+        'Run telstore again with only the ids that are left — their .partial files are kept, ' +
+        'so those carry on where they stopped. "npx telstore status" shows what is unfinished.\n'
+      )
+    }
+
+    const backup = backupId ? `Backup ${backupId}` : 'This restore'
+
+    return (
+      `\n${backup} kept its .partial file — run the same command again from this directory ` +
+      'to carry on, or "npx telstore status" to see what is left.\n'
+    )
   }
 
   // A delete has already destroyed messages for good by the time Ctrl-C lands, and the
