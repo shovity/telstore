@@ -7,6 +7,7 @@ import path from 'node:path'
 import { runRestore, realDownloadChunk } from '../src/commands/restore.js'
 import { buildManifest, serializeManifest, manifestFileName } from '../src/manifest.js'
 import { saveConfig } from '../src/config.js'
+import { restoreFile, restoreKey } from '../src/state.js'
 import { createProgress } from '../src/progress.js'
 import { DEFAULT_DOWNLOAD_CONCURRENCY } from '../src/chunking.js'
 
@@ -710,4 +711,79 @@ test('a resumed restore names the chunks it skipped', async () => {
 
   assert.match(seen.text(), /Chunk 1\/3 already restored, skipping\./)
   assert.doesNotMatch(seen.text(), /Chunk 2\/3 already restored/)
+})
+
+test('the record tracks an unfinished restore and is gone once it finishes', async () => {
+  const backup = fakeBackup()
+  const { dir, configDir } = await tempConfig()
+  const out = path.join(dir, 'out.tar')
+  const key = restoreKey(backup.id, out)
+  const seen = []
+
+  const base = deps(fakeClient(backup), configDir)
+
+  await runRestore(backup.id, { out }, {
+    ...base,
+    downloadChunk: async (...args) => {
+      seen.push(JSON.parse(await fs.readFile(restoreFile(key, configDir), 'utf8')))
+      return await base.downloadChunk(...args)
+    },
+  })
+
+  assert.equal(seen.length, 3)
+  assert.deepEqual(seen.map((record) => record.done), [0, 1, 2])
+  assert.equal(seen[0].id, backup.id)
+  assert.equal(seen[0].target, out)
+  assert.equal(seen[0].chat, '@store')
+  assert.equal(seen[0].size, 1000)
+  assert.equal(seen[0].chunks, 3)
+
+  await assert.rejects(() => fs.stat(restoreFile(key, configDir)), { code: 'ENOENT' })
+})
+
+test('a resumed restore records the chunks it found rather than starting the count over', async () => {
+  const backup = fakeBackup()
+  const { dir, configDir } = await tempConfig()
+  const out = path.join(dir, 'out.tar')
+  const key = restoreKey(backup.id, out)
+
+  const partial = Buffer.alloc(1000)
+  backup.content.copy(partial, 0, 0, 800)
+  await fs.writeFile(`${out}.partial`, partial)
+
+  const base = deps(fakeClient(backup), configDir)
+  let first = null
+
+  await runRestore(backup.id, { out }, {
+    ...base,
+    downloadChunk: async (...args) => {
+      first ??= JSON.parse(await fs.readFile(restoreFile(key, configDir), 'utf8'))
+      return await base.downloadChunk(...args)
+    },
+  })
+
+  assert.equal(first.done, 2)
+})
+
+test('a record that cannot be written does not fail the restore', async () => {
+  const backup = fakeBackup()
+  const { dir, configDir } = await tempConfig()
+  const out = path.join(dir, 'out.tar')
+
+  // A file where the state directory belongs: every write under it fails, whoever is
+  // running the tests. The restore is still a restore.
+  await fs.writeFile(path.join(configDir, 'state'), 'not a directory')
+
+  const warnings = collect()
+
+  const result = await runRestore(backup.id, { out }, {
+    ...deps(fakeClient(backup), configDir),
+    silent: false,
+    log: () => {},
+    writeErr: warnings.log,
+  })
+
+  assert.equal(result.size, 1000)
+  assert.deepEqual(await fs.readFile(out), backup.content)
+  assert.match(warnings.text(), /could not record restore progress/)
 })

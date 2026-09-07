@@ -14,6 +14,7 @@ import { requireChat, resolveSettings } from '../settings.js'
 import { downloadToFile, hashRange } from '../downloader.js'
 import { parseManifest } from '../manifest.js'
 import { createProgress, formatBytes, formatDuration } from '../progress.js'
+import { clearRestore, pruneRestores, restoreKey, saveRestore } from '../state.js'
 
 // Anything past a minute of waiting needs saying out loud; below that the pause is shorter
 // than the time a user would spend wondering about it.
@@ -135,6 +136,33 @@ export async function runRestore(backupId, options = {}, deps = {}) {
     const target = path.resolve(options.out ?? safeOutName(manifest.name))
     const partial = `${target}.partial`
 
+    const key = restoreKey(backupId, target)
+
+    // The record is a signpost for `status`, never evidence. The scan above proved every
+    // chunk it skipped against the manifest and would do so again if this file vanished, so
+    // a signpost that cannot be planted warns and gets out of the way. Deliberately the
+    // opposite of markChunkDone, where a failed write must be fatal because losing it
+    // strands chunks in a chat with nothing left pointing at them.
+    async function note(done) {
+      try {
+        await saveRestore(
+          key,
+          {
+            v: 1,
+            id: manifest.id,
+            target,
+            chat: String(chat),
+            size: manifest.size,
+            chunks: manifest.chunks.length,
+            done,
+          },
+          configDir,
+        )
+      } catch (err) {
+        warn(`\nWarning: could not record restore progress: ${err.message}\n`)
+      }
+    }
+
     // Only ENOENT means "no file yet". Treating a permission or I/O error as absence
     // would have telstore overwrite the user's file without asking.
     let exists = true
@@ -181,6 +209,16 @@ export async function runRestore(backupId, options = {}, deps = {}) {
         done = await scanPartial(handle, manifest, log)
         if (done === 0) log(`Nothing in ${partial} matches this backup, starting over.`)
         log('')
+      }
+
+      await note(done)
+
+      // Housekeeping, the way runUpload prunes its own records. It removes signposts only:
+      // dropping one costs a line of `status` for a .partial that still resumes.
+      try {
+        await pruneRestores(configDir)
+      } catch (err) {
+        warn(`\nWarning: could not tidy old restore records: ${err.message}\n`)
       }
 
       const pending = manifest.chunks.slice(done)
@@ -243,6 +281,8 @@ export async function runRestore(backupId, options = {}, deps = {}) {
                 `Chunk ${chunk.i + 1} has a sha256 that does not match the manifest. The download is kept at ${partial} for inspection.`,
               )
             }
+
+            await note(chunk.i + 1)
           }
         } finally {
           // The bar owns a line that \r keeps returning to. Ending it here rather than after the
@@ -268,6 +308,13 @@ export async function runRestore(backupId, options = {}, deps = {}) {
     }
 
     await fs.rename(partial, target)
+
+    // The restore is finished; the signpost has nothing left to point at.
+    try {
+      await clearRestore(key, configDir)
+    } catch (err) {
+      warn(`\nWarning: could not remove the restore record: ${err.message}\n`)
+    }
 
     log(`\nDone. Wrote ${formatBytes(manifest.size)} to ${target}`)
 
