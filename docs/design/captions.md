@@ -77,6 +77,12 @@
     chunks those would fill every page before a manifest appeared, which is the same reason
     `#telstore` was kept off chunk captions in the first place.
 
+    That was a **one-chunk** backup, so the sentence above was extrapolation. Measured again
+    on 2026-09-08 in the throwaway e2e channel against a **six-chunk** backup: the bare id
+    returned 7 hits — the manifest and all six chunks — and the same id with the tag returned
+    1, the manifest alone. The noise grows with the chunk count exactly as assumed, and the
+    tag removes all of it.
+
 - **The index says where to look, `matchesTerm` says what is true.** Every hit is checked
   against the backup id, file name, whole note and creation day before it reaches the table,
   because Telegram's answer is not the answer the user asked for: `2026-09` came back with
