@@ -38,11 +38,15 @@ runs every command under a temporary `HOME`, because `logout` and `config` write
 against the real `~/.telstore` would destroy the session of whoever is running the tests. It
 deletes only the ids it created.
 
-Its first run found something the whole suite had been blind to: `list` finds nothing in a
-broadcast channel. It searches for the literal `#telstore`, and a query beginning with `#` is
-answered out of Telegram's hashtag index, which does not hold captions telstore sends as plain
-text with no parse mode. Measured 2026-09-07: `#telstore` returned 0 in a channel whose eight
-messages a plain enumeration returned in full, while a search for a backup id returned both of
-its messages. A legacy group answers all three the same way, which is why nobody had noticed.
-`list` in a channel is still open — searching a different string is not the fix, since
-`.manifest.json` returned every manifest in one session and none in the next.
+Its first run found something the whole suite had been blind to: `list` found nothing in a
+newly created broadcast channel, though every backup in it restored perfectly. The first
+diagnosis written here was wrong — it blamed the `#` on `#telstore` and Telegram's hashtag
+index — and a second day of measuring took it apart: the same query in the same channel was
+right the next morning. What is true is that Telegram's text index is eventually consistent
+and can be empty for hours in a new chat, while the documents themselves are always there for
+the asking. `list` walks the chat now; `docs/design/captions.md` carries the measurements.
+
+Two lessons worth more than the bug. A measurement taken once is a measurement of one moment:
+".manifest.json" looked like the fix for exactly as long as one session lasted. And an
+explanation that fits the data is not the same as the cause — the hashtag story fit every
+observation available on the first day and was still wrong.

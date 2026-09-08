@@ -15,8 +15,13 @@ export function chunkFileName(id, i) {
   return `${id}.part${String(i + 1).padStart(4, '0')}`
 }
 
+// The suffix telstore has written on every manifest since version 1, and what `list` picks
+// a manifest out of a chat by. One definition, because a reader that disagrees with the
+// writer by one character finds nothing at all.
+export const MANIFEST_SUFFIX = '.manifest.json'
+
 export function manifestFileName(id) {
-  return `${id}.manifest.json`
+  return `${id}${MANIFEST_SUFFIX}`
 }
 
 export function buildManifest({

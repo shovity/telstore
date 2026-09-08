@@ -66,7 +66,7 @@ a prompt that does not echo.
 
 Every chunk goes up as a document captioned `📦 <backupId> · 3/12`, followed by a manifest
 carrying a summary card — file name, size, id, date and the restore command. `list` reads
-those cards straight out of the chat, one search and no downloads:
+those cards straight out of the chat, no downloads:
 
 ```
 Destination  https://web.telegram.org/k/#@my_backups
