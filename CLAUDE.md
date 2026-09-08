@@ -12,9 +12,13 @@ documentation and commit messages are all written in English.
 
 ```bash
 npm test        # node --test over test/**/*.test.js
+npm run test:e2e   # needs TELSTORE_E2E_CHAT and a real login; skips itself without one
 ```
 
-No build step, no linter. `npm test` is the whole gate.
+No build step, no linter. `npm test` is the whole gate, and it never touches the network:
+every test in `test/` talks to a fake client. `e2e/` is the opposite — real account, real
+uploads, its own temporary `HOME` — and is run by hand before a release. See
+`docs/design/testing-blind-spots.md`.
 
 ## Constraints
 
