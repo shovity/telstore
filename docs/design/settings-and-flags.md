@@ -12,11 +12,14 @@
   file). `--to` was removed rather than kept as an alias: `parseArgs` refuses it by name, so an
   old script stops instead of sending a backup somewhere nobody chose, and one setting keeps one
   name. `ALIASES` still earns its place for `chunk-size` and the two concurrencies.
-- Four flags have no setting behind them, none of them a preference: `--out` names where one
+- Five flags have no setting behind them, none of them a preference: `--out` names where one
   restore goes (and is refused outright against several ids), `--yes` answers a question about
   one particular run (stored, it would be standing permission never to ask before destroying
   a backup), `--note` says what one upload is about (stored, it would label every backup for
-  months with a sentence nobody remembers writing), and `--token` takes **no value** —
+  months with a sentence nobody remembers writing), `--search` asks one question of one
+  listing (stored, it would quietly filter every `list` afterwards by a word nobody remembers
+  setting, and an empty one is refused rather than answered with everything), and `--token`
+  takes **no value** —
   a token on the command line sits in `ps` and in shell history, so it is pasted at a prompt
   that does not echo. `login` refuses a positional argument rather than ignoring one.
 - The `--chunk-size` refusal keys off the *source* of the size, not its presence: a config

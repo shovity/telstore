@@ -4,6 +4,7 @@ import {
   closeQuietly,
   connect as realConnect,
   iterDocuments,
+  iterManifestSearch,
 } from '../client.js'
 import { configFile, defaultConfigDir, loadConfig } from '../config.js'
 import { MANIFEST_SUFFIX } from '../manifest.js'
@@ -31,11 +32,21 @@ function shorten(note) {
   return note.length > NOTE_WIDTH ? `${note.slice(0, NOTE_WIDTH - 1)}…` : note
 }
 
-// How far back list is willing to walk. A backup is one manifest and one message per chunk,
+// How far back list is willing to read. A backup is one manifest and one message per chunk,
 // so a chat of ordinary backups gives up its newest twenty in a single request; this ceiling
 // only bites where a few backups hold thousands of chunks between them, and there the answer
-// says what it looked at rather than pretending to have seen the whole chat.
+// says what it looked at rather than pretending to have seen the whole chat. --search reads
+// the same number of results, where a result is already a manifest rather than any document.
 export const MAX_LIST_DOCUMENTS = 1000
+
+// Telegram matches whole words and nothing shorter: measured 2026-09-08, "projex" found
+// projex.zip while "proj", "pro" and "pr" each found nothing at all. That is the one way a
+// search can come back empty over a backup that is plainly there, so the empty answer says
+// it, and points at the listing that never asks the index.
+const SEARCH_MISS_HELP =
+  'Telegram matches whole words: "projex" finds projex.zip, "proj" does not. ' +
+  'Run "npx telstore list" without --search to see every backup without going through ' +
+  'the search index.'
 
 function backupIdFromFileName(fileName) {
   return fileName.slice(0, -MANIFEST_SUFFIX.length)
@@ -74,6 +85,45 @@ function toRow(message) {
   }
 }
 
+// A search term is a question about one run, and an empty one is not a question: answering
+// it with every backup would look exactly like a search that matched everything.
+function parseSearchTerm(raw) {
+  if (raw === undefined || raw === null) return null
+
+  const term = String(raw).trim()
+
+  if (term === '') {
+    throw new Error(
+      '--search is empty. Write the word to look for, or leave the flag off — "list" ' +
+        'without it shows every backup.',
+    )
+  }
+
+  return term
+}
+
+// The four fields a person remembers about a backup, and the whole of what --search compares
+// against. The note is matched entire rather than the 40 characters the table has room for:
+// a word that fell off the end of the column is still a word they typed. A card that cannot
+// be read back leaves only what the message itself knows.
+function searchableFields(message) {
+  const id = backupIdFromFileName(message.fileName)
+  const card = parseManifestCaption(message.caption)
+
+  if (!card) return [id, utcDay(message.date)]
+
+  return [id, card.name, card.note ?? '', card.createdAt.slice(0, 10)]
+}
+
+// Telegram decides what comes back; this decides what is true. The index answers a term the
+// way it wants to — measured 2026-09-08, "2026-09" returned every document in the chat — so
+// a hit is shown only if the term really is in one of the fields above. Without this pass a
+// search for a month would list backups from every other month, which is the plausible wrong
+// answer this project exists to refuse.
+function matchesTerm(message, term) {
+  return searchableFields(message).some((field) => field.toLowerCase().includes(term))
+}
+
 function renderTable(rows) {
   // Most people never write a note, and a column of dashes tells them nothing they did not
   // already know while costing every other column the width it takes.
@@ -103,11 +153,15 @@ export async function runList(options = {}, deps = {}) {
     connect = realConnect,
     disconnect = (client) => client.destroy(),
     readDocuments = iterDocuments,
+    searchManifests = iterManifestSearch,
     log = (line) => console.log(line),
   } = deps
 
   const config = await loadConfig(configDir)
   const { values: settings } = resolveSettings(options, config, { file: configFile(configDir) })
+  // Before the login gate: a bad term is the user's own typing, and telling them to log in
+  // first would send them off after the wrong thing.
+  const term = parseSearchTerm(options.search)
   // Ask about the login before the destination: telling someone who has never logged in
   // to pick a chat sends them off after the wrong thing.
   assertLoggedIn(config)
@@ -115,18 +169,30 @@ export async function runList(options = {}, deps = {}) {
 
   const client = await connect(config, { verbose: settings.verbose })
 
-  // Walked rather than searched. Telegram's text index can answer nothing at all about a
-  // chat that is full of backups — it did for a whole day in a channel that had just been
-  // created — and "No backups found" is a sentence someone acts on. The documents
-  // themselves were right every time they were asked for.
+  // Walked rather than searched, unless a term was given. Telegram's text index can answer
+  // nothing at all about a chat that is full of backups — it did for a whole day in a channel
+  // that had just been created — and "No backups found" is a sentence someone acts on. The
+  // documents themselves were right every time they were asked for.
+  //
+  // --search is the one place worth paying the index for: a term matches a backup that may be
+  // ten thousand messages back, and walking to it would cost a request per hundred documents
+  // in between, every time, for as long as the chat keeps growing. So the search narrows and
+  // matchesTerm decides — the index is asked where to look, never what is true.
   const found = []
-  let walked = 0
+  let read = 0
+
+  const results = term
+    ? searchManifests(client, chat, term, { max: MAX_LIST_DOCUMENTS })
+    : readDocuments(client, chat, { max: MAX_LIST_DOCUMENTS })
+
+  const wanted = term === null ? null : term.toLowerCase()
 
   try {
-    for await (const document of readDocuments(client, chat, { max: MAX_LIST_DOCUMENTS })) {
-      walked += 1
+    for await (const document of results) {
+      read += 1
 
       if (!document.fileName?.endsWith(MANIFEST_SUFFIX)) continue
+      if (wanted !== null && !matchesTerm(document, wanted)) continue
 
       found.push(document)
 
@@ -139,19 +205,32 @@ export async function runList(options = {}, deps = {}) {
     await closeQuietly(client, disconnect)
   }
 
-  // The one thing the walk cannot see is what lies past its own ceiling, so anything it says
-  // about the whole chat has to stop at the edge of what it read.
-  const capped = found.length < settings.limit && walked >= MAX_LIST_DOCUMENTS
+  // The one thing either reader cannot see is what lies past its own ceiling, so anything it
+  // says about the whole chat has to stop at the edge of what it read.
+  const capped = found.length < settings.limit && read >= MAX_LIST_DOCUMENTS
+  const unit = term ? 'search results' : 'documents'
 
   log(`Destination  ${describeChat(chat)}`)
+  if (term) log(`Search       ${JSON.stringify(term)}`)
   log('')
 
   const rows = found.map(toRow)
 
   if (rows.length === 0) {
+    if (term) {
+      log(
+        capped
+          ? `No backups matching ${JSON.stringify(term)} in the newest ${MAX_LIST_DOCUMENTS} ` +
+              `${unit} from ${chatName(chat)}. There may be older ones further back.`
+          : `No backups matching ${JSON.stringify(term)} in ${chatName(chat)}.`,
+      )
+      log(SEARCH_MISS_HELP)
+      return rows
+    }
+
     log(
       capped
-        ? `No backups in the newest ${MAX_LIST_DOCUMENTS} documents of ${chatName(chat)}. ` +
+        ? `No backups in the newest ${MAX_LIST_DOCUMENTS} ${unit} of ${chatName(chat)}. ` +
             'There may be older ones further back.'
         : `No backups found in ${chatName(chat)}. Upload one with: npx telstore <file>`,
     )
@@ -161,12 +240,16 @@ export async function runList(options = {}, deps = {}) {
   for (const line of renderTable(rows)) log(line)
 
   log('')
-  log(`${rows.length} backup${rows.length === 1 ? '' : 's'}. Restore with: npx telstore restore <backup-id>`)
+  log(
+    `${rows.length} backup${rows.length === 1 ? '' : 's'}` +
+      `${term ? ` matching ${JSON.stringify(term)}` : ''}. ` +
+      'Restore with: npx telstore restore <backup-id>',
+  )
 
   if (capped) {
     log(
-      `Read the newest ${MAX_LIST_DOCUMENTS} documents in ${chatName(chat)} to find them — ` +
-        'there may be older backups further back.',
+      `Read the newest ${MAX_LIST_DOCUMENTS} ${unit} in ${chatName(chat)} to find them — ` +
+        `there may be older ${term ? 'matches' : 'backups'} further back.`,
     )
   }
 

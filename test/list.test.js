@@ -29,6 +29,9 @@ function deps(configDir, messages, out, extra = {}) {
     readDocuments: async function* () {
       yield* messages
     },
+    searchManifests: async function* () {
+      yield* messages
+    },
     ...extra,
   }
 }
@@ -318,4 +321,171 @@ test('a note too long for the table is cut short with an ellipsis', async () => 
 
   assert.match(out.text(), new RegExp(`${'x'.repeat(39)}…(\\s|$)`))
   assert.equal(out.text().includes('x'.repeat(40)), false)
+})
+
+// --search asks Telegram's index for manifests carrying the term, then keeps only the ones
+// the term really appears in. The second half is not belt-and-braces: measured 2026-09-08,
+// a search for "2026-09" came back with every document in the chat, so trusting the server's
+// answer would list backups from months the user did not ask about.
+const REPORTS = manifestMessage({
+  id: 'telstore-20260903-11aa22',
+  name: 'reports.zip',
+  size: 4096,
+  chunks: 1,
+  createdAt: '2026-09-03T09:15:00.000Z',
+  msgId: 2500,
+})
+
+function searchDeps(configDir, hits, out, extra = {}) {
+  return deps(configDir, [], out, {
+    readDocuments: async function* () {
+      throw new Error('--search must not walk the chat')
+    },
+    searchManifests: async function* () {
+      yield* hits
+    },
+    ...extra,
+  })
+}
+
+test('--search lists only the backups the term appears in', async () => {
+  const configDir = await workspace()
+  const out = collect()
+
+  await runList({ search: 'reports' }, searchDeps(configDir, [REPORTS, DATA_TAR], out))
+
+  assert.match(out.text(), /reports\.zip/)
+  assert.doesNotMatch(out.text(), /data\.tar/)
+  assert.match(out.text(), /1 backup matching "reports"\./)
+})
+
+test('--search names what was searched for above the table', async () => {
+  const configDir = await workspace()
+  const out = collect()
+
+  await runList({ search: 'reports' }, searchDeps(configDir, [REPORTS], out))
+
+  assert.match(out.text(), /Search +"reports"/)
+})
+
+test('--search ignores case', async () => {
+  const configDir = await workspace()
+  const out = collect()
+
+  await runList({ search: 'REPORTS.ZIP' }, searchDeps(configDir, [REPORTS, DATA_TAR], out))
+
+  assert.match(out.text(), /1 backup matching/)
+})
+
+// The table cuts a note at 40 characters because a long one would push every other column
+// off the side. Matching the cut version would lose the word the person actually typed, so
+// the whole note out of the manifest card is what --search compares against.
+test('--search matches a note past the 40 characters the table shows', async () => {
+  const configDir = await workspace()
+  const out = collect()
+  const long = manifestMessage({
+    id: 'telstore-20260902-33cc44',
+    name: 'ledger.tar',
+    size: 4096,
+    chunks: 1,
+    createdAt: '2026-09-02T09:00:00.000Z',
+    note: `${'padding '.repeat(6)}quarterly`,
+    msgId: 2600,
+  })
+
+  await runList({ search: 'quarterly' }, searchDeps(configDir, [long, DATA_TAR], out))
+
+  assert.match(out.text(), /ledger\.tar/)
+  assert.match(out.text(), /1 backup matching/)
+})
+
+test('--search matches a backup id', async () => {
+  const configDir = await workspace()
+  const out = collect()
+
+  await runList({ search: 'telstore-20260903-11aa22' }, searchDeps(configDir, [REPORTS, DATA_TAR], out))
+
+  assert.match(out.text(), /reports\.zip/)
+  assert.match(out.text(), /1 backup matching/)
+})
+
+test('--search matches the day a backup was created', async () => {
+  const configDir = await workspace()
+  const out = collect()
+
+  await runList({ search: '2026-09-03' }, searchDeps(configDir, [REPORTS, DATA_TAR], out))
+
+  assert.match(out.text(), /reports\.zip/)
+  assert.doesNotMatch(out.text(), /data\.tar/)
+})
+
+// The measurement that made the client-side pass non-negotiable: "2026-09" returned all 23
+// documents of the real chat, chunks included. A month is a thing people search for, and it
+// must not answer with backups from another one.
+test('a hit the term does not actually appear in is left out', async () => {
+  const configDir = await workspace()
+  const out = collect()
+
+  await runList({ search: '2026-09-03' }, searchDeps(configDir, [REPORTS, PHOTOS], out))
+
+  assert.match(out.text(), /1 backup matching/)
+  assert.doesNotMatch(out.text(), /photos\.zip/)
+})
+
+test('--search hands the term to the index rather than walking the chat', async () => {
+  const configDir = await workspace()
+  const out = collect()
+  let asked = null
+
+  await runList({ search: 'reports' }, searchDeps(configDir, [], out, {
+    searchManifests: async function* (client, chat, term, options) {
+      asked = { chat, term, options }
+    },
+  }))
+
+  assert.equal(asked.chat, '@store')
+  assert.equal(asked.term, 'reports')
+  assert.equal(asked.options.max, MAX_LIST_DOCUMENTS)
+})
+
+test('--limit counts the backups that matched, not the hits read', async () => {
+  const configDir = await workspace()
+  const out = collect()
+  const many = Array.from({ length: 6 }, (_, i) =>
+    manifestMessage({
+      id: `telstore-2026090${i + 1}-0000a${i}`,
+      name: `report${i}.tar`,
+      size: 1024,
+      chunks: 1,
+      createdAt: '2026-09-01T10:00:00.000Z',
+      msgId: 3100 + i,
+    }),
+  )
+
+  await runList({ search: 'report', limit: '4' }, searchDeps(configDir, many, out))
+
+  assert.match(out.text(), /4 backups matching "report"\./)
+})
+
+// A search that finds nothing has two causes that look identical from here: the word is not
+// in any backup, or it is there but not as a whole word. Telegram matches whole words only —
+// "projex" finds projex.zip and "proj" does not — so the answer says both, and points at the
+// listing that does not go through the index at all.
+test('nothing matching says so, and says how the matching works', async () => {
+  const configDir = await workspace()
+  const out = collect()
+
+  await runList({ search: 'proj' }, searchDeps(configDir, [], out))
+
+  assert.match(out.text(), /No backups matching "proj" in @store/)
+  assert.match(out.text(), /whole words/)
+  assert.match(out.text(), /without --search/)
+  assert.doesNotMatch(out.text(), /BACKUP ID/)
+})
+
+test('an empty --search is refused rather than listing everything', async () => {
+  const configDir = await workspace()
+  const out = collect()
+
+  await assert.rejects(() => runList({ search: '   ' }, searchDeps(configDir, [], out)), /--search/)
 })

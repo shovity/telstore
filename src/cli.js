@@ -22,6 +22,7 @@ const OPTIONS = {
   out: { type: 'string' },
   note: { type: 'string' },
   limit: { type: 'string' },
+  search: { type: 'string' },
   verbose: { type: 'boolean' },
   unset: { type: 'boolean' },
   yes: { type: 'boolean' },
@@ -35,6 +36,7 @@ Usage:
   npx telstore login                      Log in to Telegram, only needed once
   npx telstore <file|folder|pattern>...   Split files and upload them to Telegram
   npx telstore list                       List the backups stored in the destination
+  npx telstore list --search <text>       List only the backups that text appears in
   npx telstore restore <backup-id>...     Download the chunks and reassemble the files
   npx telstore verify <backup-id>...      Check that a backup's chunks are all still in the chat
   npx telstore delete <backup-id>...      Remove backups' chunks and manifests from the chat
@@ -84,6 +86,12 @@ Options apply to one run and are never saved. Use config to change a setting for
                               shell hands the words after the first to telstore as more files
                               to upload.
   --limit <n>                 How many backups list shows this run.
+  --search <text>             List only the backups whose file name, note, backup id or
+                              creation day contains this text. Telegram's own index does
+                              the looking, so the whole chat is reached without reading it
+                              message by message — but it matches whole words only:
+                              "projex" finds projex.zip and "proj" finds nothing. A term
+                              with spaces has to be quoted, as --note does.
   --token                     Log in by pasting a session token. It takes no value on
                               purpose: a token written on the command line would sit in
                               "ps" for the whole life of the command, and stay in that

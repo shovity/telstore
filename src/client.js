@@ -4,6 +4,7 @@ import { LogLevel } from 'teleproto/extensions/Logger.js'
 import { returnBigInt } from 'teleproto/Helpers.js'
 import { StringSession } from 'teleproto/sessions/index.js'
 
+import { MANIFEST_TAG } from './caption.js'
 import { manifestFileName } from './manifest.js'
 import { withRetry } from './retry.js'
 import { assertLoggedIn, unlockConfig } from './session.js'
@@ -58,24 +59,18 @@ export async function searchDocuments(client, peer, { search, limit }) {
   return messages.map(toDocument)
 }
 
-// What `list` reads the chat with. searchDocuments asks Telegram's text index a question;
-// this asks for the documents themselves, newest first, which is the only answer that was
-// right every time it was measured — a chat's text index can come back empty while the chat
-// is full of backups, and did for a whole day in a channel that had just been created
-// (docs/design/captions.md carries the measurements).
-//
-// The paging is ours rather than iterMessages', for the reasons deleteMessages does not use
-// teleproto's: every page then carries the retry policy and the stall deadline, and a page
-// that fails is retried by itself instead of restarting the walk from the newest message.
-// offsetId is the id of the last message of the page before, and Telegram answers with the
-// messages older than it — a walk that forgot to advance it would fetch the newest page over
-// and over and never reach an older backup.
+// The paging both readers share. It is ours rather than iterMessages', for the reasons
+// deleteMessages does not use teleproto's: every page then carries the retry policy and the
+// stall deadline, and a page that fails is retried by itself instead of restarting from the
+// newest message. offsetId is the id of the last message of the page before, and Telegram
+// answers with the messages older than it — a reader that forgot to advance it would fetch
+// the newest page over and over and never reach an older backup.
 //
 // A generator because the caller stops when it has what it wants: a chat of ten thousand
 // chunks costs one request to list the backups at the top of it.
 export const DOCUMENT_PAGE_SIZE = 100
 
-export async function* iterDocuments(client, peer, options = {}) {
+async function* iterMessagePages(client, peer, { search, what, options }) {
   const {
     pageSize = DOCUMENT_PAGE_SIZE,
     max = Infinity,
@@ -84,22 +79,23 @@ export async function* iterDocuments(client, peer, options = {}) {
   } = options
 
   let offsetId = 0
-  let walked = 0
+  let read = 0
 
-  while (walked < max) {
-    const limit = Math.min(pageSize, max - walked)
+  while (read < max) {
+    const limit = Math.min(pageSize, max - read)
 
     const messages = await withRetry(
       () =>
         withStallTimeout(
           client.getMessages(peer, {
+            ...(search === undefined ? {} : { search }),
             filter: new Api.InputMessagesFilterDocument(),
             limit,
             offsetId,
           }),
           stallMs,
           () =>
-            `Telegram stopped answering while reading the documents older than message ` +
+            `Telegram stopped answering while reading the ${what} older than message ` +
             `${offsetId}: nothing back for ${Math.round(stallMs / 1000)}s.`,
         ),
       retryOptions,
@@ -109,13 +105,44 @@ export async function* iterDocuments(client, peer, options = {}) {
 
     for (const message of messages) yield toDocument(message)
 
-    walked += messages.length
+    read += messages.length
     offsetId = messages[messages.length - 1].id
 
-    // A short page is the end of the chat. Asking again would cost a request to be told the
-    // same thing.
+    // A short page is the end of the results. Asking again would cost a request to be told
+    // the same thing.
     if (messages.length < limit) return
   }
+}
+
+// What `list` reads the chat with. searchDocuments asks Telegram's text index a question;
+// this asks for the documents themselves, newest first, which is the only answer that was
+// right every time it was measured — a chat's text index can come back empty while the chat
+// is full of backups, and did for a whole day in a channel that had just been created
+// (docs/design/captions.md carries the measurements).
+export async function* iterDocuments(client, peer, options = {}) {
+  yield* iterMessagePages(client, peer, { what: 'documents', options })
+}
+
+// What `list --search` reads the chat with, and the one place that knows how to ask the index
+// for backups. Two things about the query are load-bearing, both measured against a real chat
+// on 2026-09-08 (docs/design/captions.md carries the numbers):
+//
+// The tag is ANDed in because a term alone brings the backup's chunk messages back too — a
+// chunk caption carries the id — and on a backup of a few hundred chunks those would fill
+// every page before a single manifest appeared. `#telstore` rides on the manifest alone, so
+// the results come back manifests only: searching one backup id returned 1 manifest and 1
+// chunk, and the same id with the tag returned the manifest by itself.
+//
+// The tag goes *after* the term, never before. A query that starts with the hash is read as
+// a hashtag lookup and stops ANDing the rest: "#telstore projex" came back empty while
+// "projex #telstore" returned the one manifest. Leading it would turn every search into
+// "no backups found", which is the sentence this project must never say wrongly.
+export async function* iterManifestSearch(client, peer, term, options = {}) {
+  yield* iterMessagePages(client, peer, {
+    search: `${term} ${MANIFEST_TAG}`,
+    what: 'search results',
+    options,
+  })
 }
 
 // How telstore finds a backup's manifest, in one place because restore and delete must not

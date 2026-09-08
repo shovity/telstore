@@ -151,6 +151,21 @@ test('list takes --limit and --chat', () => {
   assert.equal(parsed.options.chat, '@store')
 })
 
+test('list takes --search', () => {
+  const parsed = route(['list', '--search', 'reports.zip'])
+
+  assert.equal(parsed.command, 'list')
+  assert.equal(parsed.options.search, 'reports.zip')
+})
+
+// A term with spaces in it is one term, the way a note is: unquoted, the shell hands the
+// words after the first over as files to upload.
+test('--search takes a value rather than swallowing the next flag', () => {
+  assert.throws(() => route(['list', '--search', '--verbose']), {
+    code: 'ERR_PARSE_ARGS_INVALID_OPTION_VALUE',
+  })
+})
+
 test('interrupting an upload names the backup and how to carry on', () => {
   const message = interruptMessage('upload', { backupId: 'telstore-20260905-7f3a91' })
 
@@ -315,7 +330,7 @@ test('an unquoted note leaves its remaining words as positionals', () => {
 // about. This is the one test that notices when the two drift apart.
 test('every flag the parser accepts is named in the help', () => {
   for (const flag of ['to', 'chunk-size', 'upload-concurrency', 'download-concurrency', 'out',
-    'note', 'limit', 'verbose', 'unset', 'yes', 'token', 'help']) {
+    'note', 'limit', 'search', 'verbose', 'unset', 'yes', 'token', 'help']) {
     assert.ok(HELP.includes(`--${flag}`), `--${flag} is missing from the help`)
   }
 })

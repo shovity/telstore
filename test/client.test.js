@@ -12,6 +12,7 @@ import {
   documentSize,
   getDocuments,
   iterDocuments,
+  iterManifestSearch,
 } from '../src/client.js'
 
 test('the Telegram logger is silent unless --verbose is given', () => {
@@ -407,4 +408,76 @@ test('iterDocuments fails when Telegram stops answering instead of waiting forev
     () => collectDocuments(client, { stallMs: 5, retryOptions: { attempts: 1 } }),
     /nothing back for/,
   )
+})
+
+// --search asks Telegram's index rather than walking, so what the query looks like on the
+// wire is the whole of what it can find. Measured against a real chat on 2026-09-08:
+// docs/design/captions.md carries the numbers.
+function chatOfSearchHits(count) {
+  const all = Array.from({ length: count }, (_, i) => ({ id: count - i }))
+  const calls = []
+
+  return {
+    calls,
+    async getMessages(peer, params) {
+      calls.push(params)
+      await new Promise((resolve) => setImmediate(resolve))
+
+      const older = params.offsetId ? all.filter((m) => m.id < params.offsetId) : all
+
+      return older.slice(0, params.limit)
+    },
+  }
+}
+
+async function collectSearch(client, term, options) {
+  const seen = []
+
+  for await (const doc of iterManifestSearch(client, '@store', term, options)) seen.push(doc.id)
+
+  return seen
+}
+
+test('iterManifestSearch narrows the search to manifests with the tag', async () => {
+  const client = chatOfSearchHits(1)
+
+  await collectSearch(client, 'projex', {})
+
+  assert.equal(client.calls[0].search, 'projex #telstore')
+  assert.ok(client.calls[0].filter instanceof Api.InputMessagesFilterDocument)
+})
+
+// The tag goes last on purpose. A query that *starts* with the hash is read as a hashtag
+// lookup and stops ANDing the rest: measured 2026-09-08, "#telstore projex" came back with
+// nothing while "projex #telstore" returned the one manifest. Leading it would turn every
+// search into "no backups found".
+test('iterManifestSearch puts the tag after the term, never before it', async () => {
+  const client = chatOfSearchHits(1)
+
+  await collectSearch(client, 'projex', {})
+
+  assert.doesNotMatch(client.calls[0].search, /^#telstore/)
+  assert.match(client.calls[0].search, / #telstore$/)
+})
+
+test('iterManifestSearch pages through the matches newest first', async () => {
+  const client = chatOfSearchHits(250)
+
+  const seen = await collectSearch(client, 'tar', { pageSize: 100 })
+
+  assert.equal(seen.length, 250)
+  assert.equal(seen[0], 250)
+  assert.deepEqual(
+    client.calls.map((call) => call.offsetId),
+    [0, 151, 51],
+  )
+})
+
+test('iterManifestSearch stops at the ceiling it was given', async () => {
+  const client = chatOfSearchHits(1000)
+
+  const seen = await collectSearch(client, 'tar', { pageSize: 100, max: 250 })
+
+  assert.equal(seen.length, 250)
+  assert.equal(client.calls.length, 3)
 })
