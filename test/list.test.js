@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { runList } from '../src/commands/list.js'
+import { MAX_LIST_DOCUMENTS, runList } from '../src/commands/list.js'
 import { manifestCaption } from '../src/caption.js'
 import { loadConfig, saveConfig } from '../src/config.js'
 import { LOGGED_IN, collect, tempDir } from './helpers.js'
@@ -26,7 +26,9 @@ function deps(configDir, messages, out, extra = {}) {
     log: out.log,
     connect: async () => ({}),
     disconnect: async () => {},
-    searchManifests: async () => messages,
+    readDocuments: async function* () {
+      yield* messages
+    },
     ...extra,
   }
 }
@@ -122,9 +124,8 @@ test('--chat looks somewhere else without changing the configured destination', 
   let asked = null
 
   await runList({ chat: '@other' }, deps(configDir, [], out, {
-    searchManifests: async (client, chat) => {
+    readDocuments: async function* (client, chat) {
       asked = chat
-      return []
     },
   }))
 
@@ -132,19 +133,87 @@ test('--chat looks somewhere else without changing the configured destination', 
   assert.equal((await loadConfig(configDir)).settings.chat, '@store')
 })
 
-test('--limit caps how many messages the search asks for', async () => {
+// --limit is a number of backups, and the walk stops the moment it has that many: a chat of
+// ten thousand chunk messages must cost one request to list the backups at the top of it,
+// not ten.
+test('--limit caps the backups listed, and the walk stops there', async () => {
+  const configDir = await workspace()
+  const out = collect()
+  let read = 0
+
+  const many = Array.from({ length: 6 }, (_, i) =>
+    manifestMessage({
+      id: `telstore-2026090${i + 1}-00000${i + 1}`,
+      name: `f${i}.tar`,
+      size: 1024,
+      chunks: 1,
+      createdAt: '2026-09-01T10:00:00.000Z',
+      msgId: 3000 + i,
+    }),
+  )
+
+  await runList({ limit: '5' }, deps(configDir, [], out, {
+    readDocuments: async function* () {
+      for (const message of many) {
+        read += 1
+        yield message
+      }
+    },
+  }))
+
+  assert.match(out.text(), /5 backups\./)
+  assert.equal(read, 5)
+})
+
+// The walk is the whole of what list knows, so it has to be told where to stop.
+test('list walks with a ceiling rather than to the end of the chat', async () => {
   const configDir = await workspace()
   const out = collect()
   let asked = null
 
-  await runList({ limit: '5' }, deps(configDir, [], out, {
-    searchManifests: async (client, chat, limit) => {
-      asked = limit
-      return []
+  await runList({}, deps(configDir, [], out, {
+    readDocuments: async function* (client, chat, options) {
+      asked = options
     },
   }))
 
-  assert.equal(asked, 5)
+  assert.equal(asked.max, MAX_LIST_DOCUMENTS)
+})
+
+// "No backups found" is a claim about a whole chat, and the walk only ever saw the newest
+// part of it. Saying it after stopping at the ceiling would be the silence this project
+// does not do — the backups may be one message further back.
+test('a chat too long to walk to the end says what it actually looked at', async () => {
+  const configDir = await workspace()
+  const out = collect()
+
+  await runList({}, deps(configDir, [], out, {
+    readDocuments: async function* () {
+      for (let i = 0; i < MAX_LIST_DOCUMENTS; i += 1) {
+        yield { id: 9000 - i, fileName: `telstore-20260905-7f3a91.part${i}`, caption: '', date: 0 }
+      }
+    },
+  }))
+
+  assert.match(out.text(), new RegExp(`newest ${MAX_LIST_DOCUMENTS} documents`))
+  assert.doesNotMatch(out.text(), /No backups found in @store\./)
+})
+
+test('a backup found before the ceiling still warns that older ones may be further back', async () => {
+  const configDir = await workspace()
+  const out = collect()
+
+  await runList({}, deps(configDir, [], out, {
+    readDocuments: async function* () {
+      yield DATA_TAR
+      for (let i = 1; i < MAX_LIST_DOCUMENTS; i += 1) {
+        yield { id: 9000 - i, fileName: `telstore-20260905-7f3a91.part${i}`, caption: '', date: 0 }
+      }
+    },
+  }))
+
+  assert.match(out.text(), /1 backup\./)
+  assert.match(out.text(), new RegExp(`newest ${MAX_LIST_DOCUMENTS} documents`))
 })
 
 test('a --limit that is not a positive whole number is refused', async () => {

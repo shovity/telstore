@@ -1,11 +1,12 @@
-import { MANIFEST_TAG, parseManifestCaption } from '../caption.js'
+import { parseManifestCaption } from '../caption.js'
 import { chatName, describeChat } from '../chat.js'
 import {
   closeQuietly,
   connect as realConnect,
-  searchDocuments,
+  iterDocuments,
 } from '../client.js'
 import { configFile, defaultConfigDir, loadConfig } from '../config.js'
+import { MANIFEST_SUFFIX } from '../manifest.js'
 import { assertLoggedIn } from '../session.js'
 import { requireChat, resolveSettings } from '../settings.js'
 
@@ -30,15 +31,14 @@ function shorten(note) {
   return note.length > NOTE_WIDTH ? `${note.slice(0, NOTE_WIDTH - 1)}…` : note
 }
 
-// Telegram indexes the tag the manifest caption carries, so one search returns one hit
-// per backup instead of one per chunk. What comes back is still whatever the server
-// decided to match, which is why the caller filters on the file name afterwards.
-async function realSearchManifests(client, peer, limit) {
-  return await searchDocuments(client, peer, { search: MANIFEST_TAG, limit })
-}
+// How far back list is willing to walk. A backup is one manifest and one message per chunk,
+// so a chat of ordinary backups gives up its newest twenty in a single request; this ceiling
+// only bites where a few backups hold thousands of chunks between them, and there the answer
+// says what it looked at rather than pretending to have seen the whole chat.
+export const MAX_LIST_DOCUMENTS = 1000
 
 function backupIdFromFileName(fileName) {
-  return fileName.replace(/\.manifest\.json$/, '')
+  return fileName.slice(0, -MANIFEST_SUFFIX.length)
 }
 
 function utcDay(unixSeconds) {
@@ -102,7 +102,7 @@ export async function runList(options = {}, deps = {}) {
     configDir = defaultConfigDir(),
     connect = realConnect,
     disconnect = (client) => client.destroy(),
-    searchManifests = realSearchManifests,
+    readDocuments = iterDocuments,
     log = (line) => console.log(line),
   } = deps
 
@@ -115,22 +115,46 @@ export async function runList(options = {}, deps = {}) {
 
   const client = await connect(config, { verbose: settings.verbose })
 
-  let found
+  // Walked rather than searched. Telegram's text index can answer nothing at all about a
+  // chat that is full of backups — it did for a whole day in a channel that had just been
+  // created — and "No backups found" is a sentence someone acts on. The documents
+  // themselves were right every time they were asked for.
+  const found = []
+  let walked = 0
+
   try {
-    found = await searchManifests(client, chat, settings.limit)
+    for await (const document of readDocuments(client, chat, { max: MAX_LIST_DOCUMENTS })) {
+      walked += 1
+
+      if (!document.fileName?.endsWith(MANIFEST_SUFFIX)) continue
+
+      found.push(document)
+
+      // Everything past here is older than the twentieth newest backup, and nobody asked
+      // for it. In a chat of ten thousand chunks this is the difference between one
+      // request and ten.
+      if (found.length >= settings.limit) break
+    }
   } finally {
     await closeQuietly(client, disconnect)
   }
 
+  // The one thing the walk cannot see is what lies past its own ceiling, so anything it says
+  // about the whole chat has to stop at the edge of what it read.
+  const capped = found.length < settings.limit && walked >= MAX_LIST_DOCUMENTS
+
   log(`Destination  ${describeChat(chat)}`)
   log('')
 
-  const rows = found
-    .filter((message) => message.fileName?.endsWith('.manifest.json'))
-    .map(toRow)
+  const rows = found.map(toRow)
 
   if (rows.length === 0) {
-    log(`No backups found in ${chatName(chat)}. Upload one with: npx telstore <file>`)
+    log(
+      capped
+        ? `No backups in the newest ${MAX_LIST_DOCUMENTS} documents of ${chatName(chat)}. ` +
+            'There may be older ones further back.'
+        : `No backups found in ${chatName(chat)}. Upload one with: npx telstore <file>`,
+    )
     return rows
   }
 
@@ -138,6 +162,13 @@ export async function runList(options = {}, deps = {}) {
 
   log('')
   log(`${rows.length} backup${rows.length === 1 ? '' : 's'}. Restore with: npx telstore restore <backup-id>`)
+
+  if (capped) {
+    log(
+      `Read the newest ${MAX_LIST_DOCUMENTS} documents in ${chatName(chat)} to find them — ` +
+        'there may be older backups further back.',
+    )
+  }
 
   return rows
 }

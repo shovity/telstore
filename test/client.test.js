@@ -11,6 +11,7 @@ import {
   deleteMessages,
   documentSize,
   getDocuments,
+  iterDocuments,
 } from '../src/client.js'
 
 test('the Telegram logger is silent unless --verbose is given', () => {
@@ -281,4 +282,129 @@ test('documentSize reads the BigInteger teleproto puts on a document', () => {
 
 test('documentSize is null for a message carrying no document', () => {
   assert.equal(documentSize({ id: 1 }), null)
+})
+
+// `list` walks the chat instead of asking Telegram's text index a question: the index can
+// answer nothing at all about a chat that is full of backups, and did for a whole day in a
+// newly created channel (docs/design/captions.md). The walk is ours rather than
+// iterMessages' so every page carries the retry policy and the stall deadline, and so a
+// failed page is retried by itself instead of restarting the walk from the newest message.
+function chatOfDocuments(count, { hang = false, failTimes = 0 } = {}) {
+  // Newest first, ids descending, exactly as Telegram answers.
+  const all = Array.from({ length: count }, (_, i) => ({ id: count - i }))
+  const calls = []
+  let inFlight = 0
+  let maxInFlight = 0
+
+  return {
+    calls,
+    maxInFlight: () => maxInFlight,
+    async getMessages(peer, params) {
+      calls.push(params)
+      inFlight += 1
+      maxInFlight = Math.max(maxInFlight, inFlight)
+
+      try {
+        if (hang) return await new Promise(() => {})
+        await new Promise((resolve) => setImmediate(resolve))
+        if (calls.length <= failTimes) throw new Error('server said no')
+
+        const older = params.offsetId ? all.filter((m) => m.id < params.offsetId) : all
+
+        return older.slice(0, params.limit)
+      } finally {
+        inFlight -= 1
+      }
+    },
+  }
+}
+
+async function collectDocuments(client, options) {
+  const seen = []
+
+  for await (const document of iterDocuments(client, '@store', options)) seen.push(document.id)
+
+  return seen
+}
+
+test('iterDocuments walks a chat newest first, page by page', async () => {
+  const client = chatOfDocuments(250)
+
+  const seen = await collectDocuments(client, { pageSize: 100 })
+
+  assert.equal(seen.length, 250)
+  assert.equal(seen[0], 250)
+  assert.equal(seen.at(-1), 1)
+  // Each page starts where the last one ended, or the walk would fetch the newest hundred
+  // over and over and never reach the older backups.
+  assert.deepEqual(
+    client.calls.map((call) => call.offsetId),
+    [0, 151, 51],
+  )
+})
+
+test('iterDocuments asks only for documents', async () => {
+  const client = chatOfDocuments(1)
+
+  await collectDocuments(client, {})
+
+  assert.ok(client.calls[0].filter instanceof Api.InputMessagesFilterDocument)
+})
+
+test('iterDocuments stops at the ceiling it was given', async () => {
+  const client = chatOfDocuments(1000)
+
+  const seen = await collectDocuments(client, { pageSize: 100, max: 250 })
+
+  assert.equal(seen.length, 250)
+  assert.equal(client.calls.length, 3)
+})
+
+// A caller that has what it needs stops consuming, and the walk must not have fetched a page
+// it was never asked for: that is the difference between one request and ten on every list.
+test('iterDocuments fetches no further page once the caller stops', async () => {
+  const client = chatOfDocuments(1000)
+
+  for await (const document of iterDocuments(client, '@store', { pageSize: 100 })) {
+    if (document.id === 990) break
+  }
+
+  assert.equal(client.calls.length, 1)
+})
+
+test('iterDocuments stops when the chat runs out', async () => {
+  const client = chatOfDocuments(120)
+
+  const seen = await collectDocuments(client, { pageSize: 100 })
+
+  assert.equal(seen.length, 120)
+  assert.equal(client.calls.length, 2)
+})
+
+test('iterDocuments keeps one request in flight at a time', async () => {
+  const client = chatOfDocuments(500)
+
+  await collectDocuments(client, { pageSize: 100 })
+
+  assert.equal(client.maxInFlight(), 1)
+})
+
+test('iterDocuments retries a page that failed once and carries on', async () => {
+  const client = chatOfDocuments(120, { failTimes: 1 })
+
+  const seen = await collectDocuments(client, {
+    pageSize: 100,
+    retryOptions: { attempts: 3, sleep: async () => {} },
+  })
+
+  assert.equal(seen.length, 120)
+})
+
+test('iterDocuments fails when Telegram stops answering instead of waiting forever', async () => {
+  const client = chatOfDocuments(120, { hang: true })
+
+  await assert.rejects(
+    () => collectDocuments(client, { stallMs: 5, retryOptions: { attempts: 1 } }),
+    /nothing back for/,
+  )
 })

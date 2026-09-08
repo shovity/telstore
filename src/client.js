@@ -32,6 +32,18 @@ export function documentSize(message) {
   return size === undefined || size === null ? null : returnBigInt(size).toJSNumber()
 }
 
+// The flat shape both readers of a chat hand back. The raw message is kept alongside it
+// because downloading needs it whole.
+function toDocument(message) {
+  return {
+    id: message.id,
+    fileName: documentFileName(message),
+    caption: message.message ?? '',
+    date: message.date,
+    message,
+  }
+}
+
 // The one place telstore searches a chat. Both callers want documents and nothing else,
 // and getMessages is preferred over a raw Api.messages.Search because it handles offsets,
 // hashes and pagination itself, so we don't hand-build easily mistyped fields. The raw
@@ -43,13 +55,67 @@ export async function searchDocuments(client, peer, { search, limit }) {
     limit,
   })
 
-  return messages.map((message) => ({
-    id: message.id,
-    fileName: documentFileName(message),
-    caption: message.message ?? '',
-    date: message.date,
-    message,
-  }))
+  return messages.map(toDocument)
+}
+
+// What `list` reads the chat with. searchDocuments asks Telegram's text index a question;
+// this asks for the documents themselves, newest first, which is the only answer that was
+// right every time it was measured — a chat's text index can come back empty while the chat
+// is full of backups, and did for a whole day in a channel that had just been created
+// (docs/design/captions.md carries the measurements).
+//
+// The paging is ours rather than iterMessages', for the reasons deleteMessages does not use
+// teleproto's: every page then carries the retry policy and the stall deadline, and a page
+// that fails is retried by itself instead of restarting the walk from the newest message.
+// offsetId is the id of the last message of the page before, and Telegram answers with the
+// messages older than it — a walk that forgot to advance it would fetch the newest page over
+// and over and never reach an older backup.
+//
+// A generator because the caller stops when it has what it wants: a chat of ten thousand
+// chunks costs one request to list the backups at the top of it.
+export const DOCUMENT_PAGE_SIZE = 100
+
+export async function* iterDocuments(client, peer, options = {}) {
+  const {
+    pageSize = DOCUMENT_PAGE_SIZE,
+    max = Infinity,
+    retryOptions = {},
+    stallMs = DEFAULT_STALL_MS,
+  } = options
+
+  let offsetId = 0
+  let walked = 0
+
+  while (walked < max) {
+    const limit = Math.min(pageSize, max - walked)
+
+    const messages = await withRetry(
+      () =>
+        withStallTimeout(
+          client.getMessages(peer, {
+            filter: new Api.InputMessagesFilterDocument(),
+            limit,
+            offsetId,
+          }),
+          stallMs,
+          () =>
+            `Telegram stopped answering while reading the documents older than message ` +
+            `${offsetId}: nothing back for ${Math.round(stallMs / 1000)}s.`,
+        ),
+      retryOptions,
+    )
+
+    if (!messages || messages.length === 0) return
+
+    for (const message of messages) yield toDocument(message)
+
+    walked += messages.length
+    offsetId = messages[messages.length - 1].id
+
+    // A short page is the end of the chat. Asking again would cost a request to be told the
+    // same thing.
+    if (messages.length < limit) return
+  }
 }
 
 // How telstore finds a backup's manifest, in one place because restore and delete must not
