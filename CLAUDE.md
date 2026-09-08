@@ -48,10 +48,11 @@ anything that row names** — not afterwards, and not only when something looks 
 | --- | --- |
 | `src/manifest.js`, `src/state.js`, `src/chunking.js`, `src/config.js` | `docs/design/data-integrity.md` |
 | `src/commands/restore.js`, the resume scan | `docs/design/data-integrity.md` |
+| `src/commands/verify.js` | `docs/design/data-integrity.md` |
 | `src/stall.js`, `src/retry.js`, anything that waits on the network | `docs/design/stalls-and-retries.md` |
 | `src/token.js`, `src/session.js`, `src/commands/login.js`, `src/commands/token.js` | `docs/design/session-tokens.md` |
 | `src/commands/delete.js`, the delete path in `src/client.js` | `docs/design/delete.md` |
-| `src/sources.js`, `runUploads` / `runRestores` / `runDeletes`, batch confirmation | `docs/design/batches.md` |
+| `src/sources.js`, `runUploads` / `runRestores` / `runDeletes` / `runVerifies`, batch confirmation | `docs/design/batches.md` |
 | `src/settings.js`, `src/cli.js`, `src/commands/config.js`, any flag | `docs/design/settings-and-flags.md` |
 | `src/caption.js`, `src/commands/list.js`, anything the chat shows | `docs/design/captions.md` |
 | `src/client.js`, `src/uploader.js`, `src/downloader.js`, `bin/telstore.js` | `docs/design/module-boundaries.md` |

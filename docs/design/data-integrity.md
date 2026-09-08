@@ -40,3 +40,21 @@
   contents have already been read by then. So a failed stat yields an unknown time that sorts
   last rather than a dropped row or a thrown report: the file can vanish between the readdir
   and the stat, and `status` is the command someone runs *because* something is wrong.
+
+- `verify` exists because nothing else answers "is this backup still restorable" without
+  downloading it. It asks the chat about every chunk message the manifest names — still
+  there, still a document, still the file name telstore wrote, still the length recorded —
+  and that is all it can ask: the bytes inside are only proved by fetching them. So the
+  closing line says so out loud rather than letting "verified" be read as more than it is.
+  The first failing check per chunk wins, because "2 damaged" has to mean two chunks.
+- `verify` goes through the full `parseManifest`, not the lenient `parseManifestJson` that
+  `delete` takes. The two commands read a manifest for opposite reasons: `delete` reads one
+  to destroy what it names, so a manifest failing its layout checks is exactly the broken
+  backup somebody is there to remove; `verify` reads one to answer whether `restore` would
+  work, and `restore` would refuse this one. Reporting that in `parseManifest`'s own words
+  keeps one fault with one description.
+- An id `verify` cannot look up does not stop a batch, where the same id would stop a
+  `delete` batch before anything was destroyed. Nothing here is destroyed, and the other ids
+  are the ones somebody is checking on. Both a damaged backup and an id nothing could be
+  found for count as failures, because the exit code answers one question: did the run find
+  everything it was asked to check.

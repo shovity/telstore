@@ -39,7 +39,7 @@
   `--yes` is what a script passes instead. Without a terminal the batch **refuses** rather than
   reading an empty line as "no": a pipe has no answer to give, and "Cancelled on request" would
   name a request nobody made. One file short-circuits past all of it — no list, no question.
-- `runRestores` and `runDeletes` mirror `runUploads` exactly: one id short-circuits, several
+- `runRestores`, `runVerifies` and `runDeletes` mirror `runUploads` exactly: one id short-circuits, several
   share one connection through the deps seam, pre-flight refuses what is knowable (a duplicate
   id, `--out` against several ids since it names one file, no login), each failure is named when
   it happens and again in the summary, and `failed > 0` is exit code 1. `runDeletes` is the one
@@ -54,3 +54,8 @@
   repeating the whole command line meets an overwrite prompt and then downloads them again
   from nothing. The ids that did not finish kept their `.partial` files and carry on where
   they stopped, which is why the message asks for those and not for the whole line.
+- `runVerifies` is the one batch with no question in front of it: it removes nothing and
+  writes nothing, so there is nothing to authorise. It is also the one where an id nothing
+  can be found for is a single failed row rather than a refusal of the whole run — the
+  reasoning that makes `runDeletes` stop before it destroys anything has nothing to protect
+  here, and the remaining ids are exactly what somebody is checking on.
