@@ -19,24 +19,26 @@ error built the way `MTProtoSender` builds one.
 When you touch code that hands an object to teleproto, assert against teleproto's own helper
 (as `test/downloader.test.js` does with `getFileInfo` and `iterDownload`) rather than the fake.
 
-Both threshold branches then have to meet a real account before a release, and that used to be
-a sentence asking somebody to remember. It is `npm run test:e2e` now:
+Both threshold branches have to meet a real account before a release. That was a sentence
+asking somebody to remember, then a fixed file (`e2e/live.test.js`), and is now the **`e2e`
+skill** in `.claude/skills/e2e/`. Nothing about a real account is reachable from `npm test` —
+the gate still cannot touch the network.
 
-```bash
-TELSTORE_E2E_CHAT=@some-chat-of-your-own npm run test:e2e
-```
+The file became a skill because the findings that mattered most were never in it. Its
+assertions caught what they were written to catch; what took the design apart came from
+probing the server and, later, from building a measurement designed to refute what we already
+believed. A fixed file cannot decide to do that, and both times the decision was worth more
+than the assertions.
 
-It uploads two backups — one cut into chunks under 10MB, one with a chunk above it and a
-remainder below, so a single run crosses `SaveFilePart`/`SaveBigFilePart` both ways — verifies
-each, restores it, compares sha256 against the file that went up, and deletes it again. It
-also removes one chunk message behind telstore's back and checks `verify` notices, which is
-the `MessageEmpty` shape no fake client can be trusted to imitate.
-
-It lives in `e2e/`, not `test/`, so `npm test` — the gate — can never reach a real account,
-and it skips itself unless `TELSTORE_E2E_CHAT` is set. It borrows the machine's own login but
-runs every command under a temporary `HOME`, because `logout` and `config` write: a run
-against the real `~/.telstore` would destroy the session of whoever is running the tests. It
-deletes only the ids it created.
+The trade is real and named in the skill: a file runs the same way every time and a skill does
+not, so the checks that used to be guaranteed are written there as **not optional** — both
+threshold branches with sha256 compared end to end, `verify` catching a chunk deleted behind
+telstore's back (the `MessageEmpty` shape no fake imitates), `iterDocuments` paging against
+the real server, `list` and `list --search` finding what was just uploaded, and cleanup of
+only the ids that run created. It borrows the machine's login but runs every command under a
+temporary `HOME`, because `logout` and `config` write: a run against the real `~/.telstore`
+would destroy the session of whoever is running it. It never uses the real backup chat,
+because it runs `delete --yes`.
 
 Its first run found something the whole suite had been blind to: `list` found nothing in a
 newly created broadcast channel, though every backup in it restored perfectly. The first

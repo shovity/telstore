@@ -12,13 +12,15 @@ documentation and commit messages are all written in English.
 
 ```bash
 npm test        # node --test over test/**/*.test.js
-npm run test:e2e   # needs TELSTORE_E2E_CHAT and a real login; skips itself without one
 ```
 
 No build step, no linter. `npm test` is the whole gate, and it never touches the network:
-every test in `test/` talks to a fake client. `e2e/` is the opposite — real account, real
-uploads, its own temporary `HOME` — and is run by hand before a release. See
-`docs/design/testing-blind-spots.md`.
+every test in `test/` talks to a fake client, which is exactly what it cannot see. Testing
+against a real account is the `e2e` skill (`.claude/skills/e2e/`) — real login, real uploads,
+its own temporary `HOME`, a throwaway chat — run before a release and after anything that
+touches teleproto or the network. It carries the checks that are not optional and the rules
+for measuring Telegram's own behaviour. See `docs/design/testing-blind-spots.md` for why the
+suite is blind and what that blindness has cost.
 
 ## Constraints
 

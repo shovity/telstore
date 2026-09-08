@@ -34,8 +34,7 @@
     "node": ">=18"
   },
   "scripts": {
-    "test": "node --test 'test/**/*.test.js'",
-    "test:e2e": "node --test 'e2e/**/*.test.js'"
+    "test": "node --test 'test/**/*.test.js'"
   },
   "dependencies": {
     "teleproto": "^1.229.0"
