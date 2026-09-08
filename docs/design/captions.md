@@ -73,7 +73,22 @@
   every query repeated three times gave the same count. ~165ms per request, one request per
   100 manifests. **Two limits on all of it:** this is one session, and the chat is small —
   nothing here measures a chat with thousands of backups in it, and the cost estimates for
-  one are arithmetic on that 165ms, not observation. The channel that returned nothing on
-  2026-09-07 was hours old and answered correctly the next day; that is consistent with the
-  index being slow on new chats and with several other explanations, so `list` keeps walking
-  by default rather than resting on the neater story.
+  one are arithmetic on that 165ms, not observation.
+
+- **The tidy explanation for 2026-09-07 was tested and did not survive.** "The index is only
+  behind on chats that have just been created" fits every observation up to that point and is
+  the reason to think `list` could stop walking. So a fresh broadcast channel was created on
+  2026-09-08 at 07:33:55 UTC, three backups uploaded into it by 07:34:32, and the index
+  watched against a walk of the same chat as the control. At **1.1 minutes old** the tag
+  search already returned all three manifests and nothing else, and matching by file name,
+  by note word and by backup id all worked. Ten probes over the next hour — 1, 3, 5, 8, 12,
+  18, 25, 35, 45 and 60 minutes — every one identical, never a single disagreement with the
+  walk.
+
+  So a brand-new channel is indexed within a minute, and the channel that stayed empty for
+  hours on 2026-09-07 was also a brand-new channel. Same condition, opposite outcome. The
+  failure is real and reproducible in the record, but **nothing here predicts when it
+  happens**, which is worse than either neat story: it cannot be ruled out and it cannot be
+  anticipated. That is why `list` still walks and only `--search` pays the index, why the
+  empty search answer points back at `list`, and why anyone reading this before deleting the
+  walk should assume the failure can return without warning.
