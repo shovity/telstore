@@ -249,6 +249,24 @@ test('delete reaches a negative channel id like every other command', () => {
   assert.equal(r.options.chat, '-1001234567890')
 })
 
+test('verify is a subcommand carrying the backup ids', () => {
+  const r = route(['verify', 'telstore-1', 'telstore-2'])
+  assert.equal(r.command, 'verify')
+  assert.deepEqual(r.args, ['telstore-1', 'telstore-2'])
+})
+
+test('verify without an id is still routed, so the command can say what is missing', () => {
+  const r = route(['verify'])
+  assert.equal(r.command, 'verify')
+  assert.deepEqual(r.args, [])
+})
+
+test('verify reaches a negative channel id like every other command', () => {
+  const r = route(['verify', 'telstore-1', '--chat', '-1001234567890'])
+  assert.equal(r.command, 'verify')
+  assert.equal(r.options.chat, '-1001234567890')
+})
+
 // Ctrl-C during a delete has already destroyed messages for good, and the manifest is
 // deliberately still there. Saying "Stopped." alone would read as "nothing happened".
 test('Ctrl-C during a delete says some chunks are already gone', () => {

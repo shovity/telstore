@@ -199,6 +199,18 @@ test('--help mentions delete', async () => {
   assert.match(stdout, /npx telstore delete/)
 })
 
+test('verify without a backup id explains what is missing', async () => {
+  const { code, stderr } = await runCli(['verify'])
+  assert.equal(code, 1)
+  assert.match(stderr, /Missing backup id/)
+  assert.doesNotMatch(stderr, /at .*\.js:\d+/)
+})
+
+test('--help mentions verify', async () => {
+  const { stdout } = await runCli(['--help'])
+  assert.match(stdout, /npx telstore verify/)
+})
+
 // --- a machine that logged in with a session token ---
 
 import { encodeToken } from '../src/token.js'

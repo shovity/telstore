@@ -28,6 +28,7 @@ npx telstore restore telstore-20260905-7f3a91
 | `telstore <file\|folder\|pattern>...` | Split each file and upload it. Prints the `backupId` you restore with. |
 | `telstore list` | The backups stored in the destination, newest first. |
 | `telstore restore <backup-id>...` | Download every chunk and reassemble the file. Several ids run one after another. |
+| `telstore verify <backup-id>...` | Check that every chunk of a backup is still in the chat. Downloads nothing. |
 | `telstore delete <backup-id>...` | Remove a backup's chunks and manifest from the chat, for good. Several ids are listed and confirmed once. |
 | `telstore status` | Account, destination, and unfinished uploads and restores. |
 | `telstore config` | Show or change settings. |
@@ -117,13 +118,44 @@ it, and the run ends with a line per file and a non-zero exit code:
   c.tar  telstore-20260905-9de447  (1 chunk)
 ```
 
+## Checking a backup is still there
+
+A backup is a set of messages in a chat, and messages can be deleted by hand. `list` reads
+the manifest's card and would happily show a backup whose chunks are long gone; `verify` asks
+the chat about every chunk the manifest names:
+
+```
+$ npx telstore verify telstore-20260905-7f3a91
+Backup telstore-20260905-7f3a91
+File   data.tar (21.4 GB, 12 chunks)
+In     https://web.telegram.org/k/#@my_backups
+
+12 chunks present, at the sizes the manifest records.
+This does not download them, so it cannot prove their contents.
+```
+
+It costs one request per hundred chunks and no bandwidth, so it is cheap enough to run on a
+schedule. What it proves is that a restore would find everything it needs — every chunk still
+there, under the file name telstore wrote, at the length the manifest records. It does not
+read the chunks, so it cannot speak for what is inside them; only a restore does that, and a
+restore checks every sha256 before it renames anything into place.
+
+A backup missing chunks is named line by line, and the exit code is 1:
+
+```
+Chunk 3/12 is gone: message 1042 is no longer in @my_backups.
+
+12 chunks checked, 1 damaged. This backup cannot be restored.
+```
+
 ## Several backups at once
 
-`restore` and `delete` take a list of ids the same way, over one connection, with a summary
-and a non-zero exit code if any of them failed:
+`restore`, `verify` and `delete` take a list of ids the same way, over one connection, with a
+summary and a non-zero exit code if any of them failed:
 
 ```bash
 npx telstore restore telstore-20260905-7f3a91 telstore-20260901-9de447
+npx telstore verify telstore-20260905-7f3a91 telstore-20260901-9de447
 npx telstore delete telstore-20260905-7f3a91 telstore-20260901-9de447
 ```
 
@@ -180,7 +212,8 @@ There is no expiry and no revocation: to end a session for good, terminate it un
   protects your login rather than your files.
 - A chunk cannot exceed 1950MB: Telegram accepts at most 4000 parts of 512KB per file.
 - Deleting a chunk message in the Telegram app destroys the backup, and keeping the
-  `backupId` is what saves you hunting for its manifest in the chat by hand.
+  `backupId` is what saves you hunting for its manifest in the chat by hand. `verify` is how
+  you find that out before you need the file rather than after.
 
 Settings and credentials live in `~/.telstore/config.json`, mode 600 — `apiId`, `apiHash` and
 the session at the top level (or a single `sealed` blob after `login --token`), everything

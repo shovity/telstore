@@ -134,6 +134,21 @@ async function main() {
       return
     }
 
+    case 'verify': {
+      if (!parsed.args[0]) {
+        throw new Error('Missing backup id. Example: npx telstore verify telstore-20260905-7f3a91')
+      }
+
+      const { runVerifies } = await import('../src/commands/verify.js')
+
+      const { failed } = await runVerifies(parsed.args, parsed.options)
+
+      // A backup that is damaged, and one telstore could not look up at all, both mean the
+      // run did not find what it was asked to check. Whatever runs telstore learns that here.
+      if (failed > 0) process.exitCode = 1
+      return
+    }
+
     case 'delete': {
       if (!parsed.args[0]) {
         throw new Error('Missing backup id. Example: npx telstore delete telstore-20260905-7f3a91')

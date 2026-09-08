@@ -1,12 +1,16 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
+import { Api } from 'teleproto'
 import { LogLevel } from 'teleproto/extensions/Logger.js'
+import { returnBigInt } from 'teleproto/Helpers.js'
 
 import {
-  DELETE_BATCH_SIZE,
+  MESSAGE_BATCH_SIZE,
   createLogger,
   deleteMessages,
+  documentSize,
+  getDocuments,
 } from '../src/client.js'
 
 test('the Telegram logger is silent unless --verbose is given', () => {
@@ -161,6 +165,120 @@ test('deleteMessages fails when Telegram stops answering instead of waiting fore
 })
 
 test('the batch size is the hundred Telegram accepts per request', () => {
-  assert.equal(DELETE_BATCH_SIZE, 100)
+  assert.equal(MESSAGE_BATCH_SIZE, 100)
 })
 
+
+// verify asks Telegram about a backup's chunk messages the same way delete removes them:
+// our own batching, one request in flight, under the retry policy and the stall deadline.
+// teleproto's getMessages would happily take ten thousand ids in one call and answer with
+// whatever it felt like; the shape of the answer is the whole point of this function.
+function messageClient({ empty = [], missing = [], hang = false, failTimes = 0 } = {}) {
+  const calls = []
+  let inFlight = 0
+  let maxInFlight = 0
+
+  return {
+    calls,
+    maxInFlight: () => maxInFlight,
+    async getMessages(peer, params) {
+      calls.push({ peer, params })
+      inFlight += 1
+      maxInFlight = Math.max(maxInFlight, inFlight)
+
+      try {
+        if (hang) return await new Promise(() => {})
+        await new Promise((resolve) => setImmediate(resolve))
+        if (calls.length <= failTimes) throw new Error('server said no')
+
+        return params.ids
+          .filter((id) => !missing.includes(id))
+          .map((id) =>
+            empty.includes(id)
+              ? new Api.MessageEmpty({ id })
+              : { id, media: { document: { size: returnBigInt(10) } } },
+          )
+      } finally {
+        inFlight -= 1
+      }
+    },
+  }
+}
+
+test('getDocuments asks for ids in batches of at most a hundred', async () => {
+  const client = messageClient()
+
+  const found = await getDocuments(client, '@store', ids(250))
+
+  assert.deepEqual(
+    client.calls.map((call) => call.params.ids.length),
+    [100, 100, 50],
+  )
+  assert.equal(found.size, 250)
+})
+
+test('getDocuments keeps one request in flight at a time', async () => {
+  const client = messageClient()
+
+  await getDocuments(client, '@store', ids(300))
+
+  assert.equal(client.maxInFlight(), 1)
+})
+
+// Telegram answers about a deleted message with MessageEmpty rather than leaving it out,
+// and MessageEmpty carries the id it was asked about. Kept in the map it would read as a
+// chunk that is still there, which is the one wrong answer this function must not give.
+test('getDocuments leaves out a message Telegram reports as empty', async () => {
+  const client = messageClient({ empty: [2] })
+
+  const found = await getDocuments(client, '@store', [1, 2, 3])
+
+  assert.deepEqual([...found.keys()], [1, 3])
+})
+
+test('getDocuments leaves out a message Telegram does not answer about at all', async () => {
+  const client = messageClient({ missing: [2] })
+
+  const found = await getDocuments(client, '@store', [1, 2, 3])
+
+  assert.deepEqual([...found.keys()], [1, 3])
+})
+
+test('getDocuments asks for nothing at all when given no ids', async () => {
+  const client = messageClient()
+
+  assert.equal((await getDocuments(client, '@store', [])).size, 0)
+  assert.equal(client.calls.length, 0)
+})
+
+test('getDocuments retries a batch that failed once and carries on', async () => {
+  const client = messageClient({ failTimes: 1 })
+
+  const found = await getDocuments(client, '@store', [1], {
+    retryOptions: { attempts: 3, sleep: async () => {} },
+  })
+
+  assert.equal(found.size, 1)
+  assert.equal(client.calls.length, 2)
+})
+
+test('getDocuments fails when Telegram stops answering instead of waiting forever', async () => {
+  const client = messageClient({ hang: true })
+
+  await assert.rejects(
+    () => getDocuments(client, '@store', ids(150), { stallMs: 5, retryOptions: { attempts: 1 } }),
+    /nothing back for/,
+  )
+})
+
+// The size arrives as a BigInteger, and comparing that to a plain number from the manifest
+// with === is false for every size there is.
+test('documentSize reads the BigInteger teleproto puts on a document', () => {
+  const message = { id: 1, media: { document: { size: returnBigInt('3221225472') } } }
+
+  assert.equal(documentSize(message), 3221225472)
+})
+
+test('documentSize is null for a message carrying no document', () => {
+  assert.equal(documentSize({ id: 1 }), null)
+})

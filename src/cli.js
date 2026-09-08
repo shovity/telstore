@@ -6,6 +6,7 @@ const SUBCOMMANDS = new Set([
   'logout',
   'list',
   'restore',
+  'verify',
   'delete',
   'status',
   'config',
@@ -35,6 +36,7 @@ Usage:
   npx telstore <file|folder|pattern>...   Split files and upload them to Telegram
   npx telstore list                       List the backups stored in the destination
   npx telstore restore <backup-id>...     Download the chunks and reassemble the files
+  npx telstore verify <backup-id>...      Check that a backup's chunks are all still in the chat
   npx telstore delete <backup-id>...      Remove backups' chunks and manifests from the chat
   npx telstore status                     Show the account, the destination and unfinished uploads and restores
   npx telstore config                     Show every setting and where its value comes from
@@ -50,8 +52,10 @@ backup. A folder means the files one level inside it, and a pattern means the na
 one file is listed and confirmed before the first byte goes out. Run telstore again with only
 the files that are left to carry on after an interruption.
 
-restore and delete take several ids the same way: one connection, one line each, and an exit
-code that reports any that failed. delete shows everything it is about to destroy and asks once.
+restore, verify and delete take several ids the same way: one connection, one line each, and
+an exit code that reports any that failed. delete shows everything it is about to destroy and
+asks once. verify downloads nothing: it asks the chat whether every chunk message is still
+there at the length the manifest records, which is what restore would need.
 
 Settings:
   npx telstore config <name>              Print one setting's value

@@ -2,7 +2,7 @@ import { promises as fs } from 'node:fs'
 
 import { chatName, describeChat } from '../chat.js'
 import {
-  DELETE_BATCH_SIZE,
+  MESSAGE_BATCH_SIZE,
   closeQuietly,
   connect as realConnect,
   deleteMessages as realDeleteMessages,
@@ -181,7 +181,7 @@ export async function runDelete(backupId, options = {}, deps = {}) {
       throw new Error('Cancelled on request.')
     }
 
-    const loud = chunkIds.length > DELETE_BATCH_SIZE
+    const loud = chunkIds.length > MESSAGE_BATCH_SIZE
     let removed = 0
 
     try {

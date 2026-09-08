@@ -1,6 +1,7 @@
 import { Api, TelegramClient } from 'teleproto'
 import { Logger } from 'teleproto/extensions/index.js'
 import { LogLevel } from 'teleproto/extensions/Logger.js'
+import { returnBigInt } from 'teleproto/Helpers.js'
 import { StringSession } from 'teleproto/sessions/index.js'
 
 import { manifestFileName } from './manifest.js'
@@ -21,6 +22,14 @@ export function documentFileName(message) {
   const attributes = message?.media?.document?.attributes ?? []
   const named = attributes.find((a) => a instanceof Api.DocumentAttributeFilename)
   return named?.fileName ?? null
+}
+
+// Telegram records a document's length as a BigInteger, and comparing that to the plain
+// number a manifest carries with === is false for every size there is.
+export function documentSize(message) {
+  const size = message?.media?.document?.size
+
+  return size === undefined || size === null ? null : returnBigInt(size).toJSNumber()
 }
 
 // The one place telstore searches a chat. Both callers want documents and nothing else,
@@ -70,11 +79,15 @@ export async function readMessageBytes(client, message) {
 //
 // Telegram does not complain about an id that is no longer there, so sending a batch twice
 // costs nothing: a delete interrupted halfway is finished by running it again.
-export const DELETE_BATCH_SIZE = 100
+//
+// The hundred is Telegram's own limit on how many message ids one request may name, and it
+// is the same limit whether the request removes them or asks about them — so getDocuments
+// below counts in the same batches rather than keeping a second opinion about one number.
+export const MESSAGE_BATCH_SIZE = 100
 
 export async function deleteMessages(client, peer, ids, options = {}) {
   const {
-    batchSize = DELETE_BATCH_SIZE,
+    batchSize = MESSAGE_BATCH_SIZE,
     retryOptions = {},
     stallMs = DEFAULT_STALL_MS,
     onBatch,
@@ -108,6 +121,53 @@ export async function deleteMessages(client, peer, ids, options = {}) {
   }
 
   return deleted
+}
+
+// What verify asks the chat, and the read-only mirror of deleteMessages above: our own
+// batching, one request in flight at a time, under the same retry policy and the same stall
+// deadline as every other network wait in telstore.
+//
+// The answer is a Map rather than a list because the question is "which of these are still
+// there". Telegram reports a message that is gone as MessageEmpty — an object carrying the
+// id it was asked about — so anything that is not a real message is left out here, where the
+// shape is understood, rather than passed on to a caller that would read an empty as a chunk
+// still sitting in the chat.
+export async function getDocuments(client, peer, ids, options = {}) {
+  const {
+    batchSize = MESSAGE_BATCH_SIZE,
+    retryOptions = {},
+    stallMs = DEFAULT_STALL_MS,
+    onBatch,
+  } = options
+
+  const found = new Map()
+
+  for (let start = 0; start < ids.length; start += batchSize) {
+    const batch = ids.slice(start, start + batchSize)
+
+    const messages = await withRetry(
+      () =>
+        withStallTimeout(
+          client.getMessages(peer, { ids: batch }),
+          stallMs,
+          () =>
+            `Telegram stopped answering while looking up messages ${start + 1}-` +
+            `${start + batch.length} of ${ids.length}: nothing back for ` +
+            `${Math.round(stallMs / 1000)}s.`,
+        ),
+      retryOptions,
+    )
+
+    for (const message of messages ?? []) {
+      if (!message || message instanceof Api.MessageEmpty) continue
+
+      found.set(message.id, message)
+    }
+
+    onBatch?.(Math.min(start + batch.length, ids.length), ids.length)
+  }
+
+  return found
 }
 
 // Every command ends by putting the connection down, and a failure there must never

@@ -67,3 +67,10 @@ test('withRetry waits out a real FLOOD_WAIT for the seconds the server named', a
 
   assert.deepEqual(delays, [42000])
 })
+
+// verify decides a chunk is gone by what teleproto hands back for a deleted message, and
+// MessageEmpty is the whole of that decision. A fake client would answer any shape at all.
+test('the teleproto pieces verify reads a chat with can be imported', () => {
+  assert.equal(typeof TelegramClient.prototype.getMessages, 'function')
+  assert.equal(typeof Api.MessageEmpty, 'function')
+})
