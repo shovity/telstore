@@ -1,9 +1,17 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { MAX_LIST_DOCUMENTS, runList } from '../src/commands/list.js'
+import {
+  DOCUMENTS_PER_BACKUP,
+  MAX_LIST_DOCUMENTS,
+  RESULTS_PER_BACKUP,
+  documentBudget,
+  runList,
+} from '../src/commands/list.js'
 import { manifestCaption } from '../src/caption.js'
 import { loadConfig, saveConfig } from '../src/config.js'
 import { LOGGED_IN, collect, tempDir } from './helpers.js'
+
+const DEFAULT_TEST_LIMIT = 20
 
 async function workspace(config = {}) {
   const configDir = await tempDir('list')
@@ -180,7 +188,7 @@ test('list walks with a ceiling rather than to the end of the chat', async () =>
     },
   }))
 
-  assert.equal(asked.max, MAX_LIST_DOCUMENTS)
+  assert.equal(asked.max, documentBudget(DEFAULT_TEST_LIMIT, DOCUMENTS_PER_BACKUP))
 })
 
 // "No backups found" is a claim about a whole chat, and the walk only ever saw the newest
@@ -190,15 +198,17 @@ test('a chat too long to walk to the end says what it actually looked at', async
   const configDir = await workspace()
   const out = collect()
 
+  const budget = documentBudget(DEFAULT_TEST_LIMIT, DOCUMENTS_PER_BACKUP)
+
   await runList({}, deps(configDir, [], out, {
     readDocuments: async function* () {
-      for (let i = 0; i < MAX_LIST_DOCUMENTS; i += 1) {
+      for (let i = 0; i < budget; i += 1) {
         yield { id: 9000 - i, fileName: `telstore-20260905-7f3a91.part${i}`, caption: '', date: 0 }
       }
     },
   }))
 
-  assert.match(out.text(), new RegExp(`newest ${MAX_LIST_DOCUMENTS} documents`))
+  assert.match(out.text(), new RegExp(`newest ${budget} documents`))
   assert.doesNotMatch(out.text(), /No backups found in @store\./)
 })
 
@@ -206,17 +216,19 @@ test('a backup found before the ceiling still warns that older ones may be furth
   const configDir = await workspace()
   const out = collect()
 
+  const budget = documentBudget(DEFAULT_TEST_LIMIT, DOCUMENTS_PER_BACKUP)
+
   await runList({}, deps(configDir, [], out, {
     readDocuments: async function* () {
       yield DATA_TAR
-      for (let i = 1; i < MAX_LIST_DOCUMENTS; i += 1) {
+      for (let i = 1; i < budget; i += 1) {
         yield { id: 9000 - i, fileName: `telstore-20260905-7f3a91.part${i}`, caption: '', date: 0 }
       }
     },
   }))
 
   assert.match(out.text(), /1 backup\./)
-  assert.match(out.text(), new RegExp(`newest ${MAX_LIST_DOCUMENTS} documents`))
+  assert.match(out.text(), new RegExp(`newest ${budget} documents`))
 })
 
 test('a --limit that is not a positive whole number is refused', async () => {
@@ -445,7 +457,7 @@ test('--search hands the term to the index rather than walking the chat', async 
 
   assert.equal(asked.chat, '@store')
   assert.equal(asked.term, 'reports')
-  assert.equal(asked.options.max, MAX_LIST_DOCUMENTS)
+  assert.equal(asked.options.max, documentBudget(DEFAULT_TEST_LIMIT, RESULTS_PER_BACKUP))
 })
 
 test('--limit counts the backups that matched, not the hits read', async () => {
@@ -488,4 +500,151 @@ test('an empty --search is refused rather than listing everything', async () => 
   const out = collect()
 
   await assert.rejects(() => runList({ search: '   ' }, searchDeps(configDir, [], out)), /--search/)
+})
+
+// What list has to read through depends on how big the backups are, not how many there are:
+// a backup is one manifest plus one message per chunk, and it stops at the newest --limit of
+// them. A fixed ceiling was therefore both too tight (20 backups of 100GB need 1140 documents
+// and only got 1000) and too loose (--limit 5 never needs a thousand).
+test('the ceiling follows --limit rather than being a fixed number', async () => {
+  const configDir = await workspace()
+  const asked = []
+
+  for (const limit of ['5', '20']) {
+    await runList({ limit }, deps(configDir, [], collect(), {
+      readDocuments: async function* (client, chat, options) {
+        asked.push(options.max)
+      },
+    }))
+  }
+
+  assert.deepEqual(asked, [5 * DOCUMENTS_PER_BACKUP, 20 * DOCUMENTS_PER_BACKUP])
+})
+
+// --limit takes any whole number, so the budget needs an end: without one, --limit 100000
+// would ask for six million documents and sixty thousand requests.
+test('the ceiling stops at a hard maximum however large --limit is', async () => {
+  const configDir = await workspace()
+  let asked = null
+
+  await runList({ limit: '100000' }, deps(configDir, [], collect(), {
+    readDocuments: async function* (client, chat, options) {
+      asked = options.max
+    },
+  }))
+
+  assert.equal(asked, MAX_LIST_DOCUMENTS)
+})
+
+// A search result is already a manifest, so it buys far more backups per document read than
+// a walk does. Its budget only has to cover what the client-side pass throws away.
+test('a search reads a smaller budget than a walk, per backup asked for', async () => {
+  const configDir = await workspace()
+  let asked = null
+
+  await runList({ search: 'reports', limit: '10' }, searchDeps(configDir, [], collect(), {
+    searchManifests: async function* (client, chat, term, options) {
+      asked = options.max
+    },
+  }))
+
+  assert.equal(asked, 10 * RESULTS_PER_BACKUP)
+  assert.ok(RESULTS_PER_BACKUP < DOCUMENTS_PER_BACKUP)
+})
+
+// Stopping at the ceiling used to leave the reader there: "there may be older backups further
+// back" is true and offers nothing to do about it. --search reaches them without reading the
+// chunks in between, which is the whole reason it exists.
+test('a walk that stops at the ceiling points at --search', async () => {
+  const configDir = await workspace()
+  const out = collect()
+  const budget = documentBudget(DEFAULT_TEST_LIMIT, DOCUMENTS_PER_BACKUP)
+
+  await runList({}, deps(configDir, [], out, {
+    readDocuments: async function* () {
+      yield DATA_TAR
+      for (let i = 1; i < budget; i += 1) {
+        yield { id: 9000 - i, fileName: `telstore-20260905-7f3a91.part${i}`, caption: '', date: 0 }
+      }
+    },
+  }))
+
+  assert.match(out.text(), /--search/)
+})
+
+test('an empty chat that stopped at the ceiling points at --search too', async () => {
+  const configDir = await workspace()
+  const out = collect()
+  const budget = documentBudget(DEFAULT_TEST_LIMIT, DOCUMENTS_PER_BACKUP)
+
+  await runList({}, deps(configDir, [], out, {
+    readDocuments: async function* () {
+      for (let i = 0; i < budget; i += 1) {
+        yield { id: 9000 - i, fileName: `telstore-20260905-7f3a91.part${i}`, caption: '', date: 0 }
+      }
+    },
+  }))
+
+  assert.match(out.text(), /--search/)
+})
+
+// Telling someone who is already searching to try searching is noise.
+test('a search that stops at the ceiling does not tell you to search', async () => {
+  const configDir = await workspace()
+  const out = collect()
+  const budget = documentBudget(DEFAULT_TEST_LIMIT, RESULTS_PER_BACKUP)
+
+  await runList({ search: 'nothing-matches' }, searchDeps(configDir, [], out, {
+    searchManifests: async function* () {
+      for (let i = 0; i < budget; i += 1) {
+        yield { id: 9000 - i, fileName: `telstore-2026-x${i}.manifest.json`, caption: '', date: 0 }
+      }
+    },
+  }))
+
+  assert.match(out.text(), /No backups matching/)
+  assert.doesNotMatch(out.text(), /list --search/)
+})
+
+// The usual walk is one request, over in about the time it takes to notice. Drawing a line
+// and erasing it there is a flicker, not information.
+test('a walk short enough to go unnoticed draws nothing', async () => {
+  const configDir = await workspace()
+  const drawn = []
+
+  await runList({}, deps(configDir, [DATA_TAR, PHOTOS], collect(), {
+    writeProgress: (text) => drawn.push(text),
+    now: () => 1000,
+  }))
+
+  assert.deepEqual(drawn, [])
+})
+
+// Past that, silence over a chat being read page by page is the hang this project refuses
+// everywhere else.
+test('a walk long enough to look like a hang says what it is reading', async () => {
+  const configDir = await workspace()
+  const drawn = []
+  let clock = 1000
+
+  await runList({}, deps(configDir, [], collect(), {
+    readDocuments: async function* () {
+      for (let i = 0; i < 400; i += 1) {
+        clock += 10
+        yield { id: 9000 - i, fileName: `telstore-20260905-7f3a91.part${i}`, caption: '', date: 0 }
+      }
+    },
+    writeProgress: (text) => drawn.push(text),
+    now: () => clock,
+  }))
+
+  assert.ok(drawn.length > 0, 'expected the walk to say something')
+  assert.ok(
+    drawn.some((text) => /documents/.test(text)),
+    'expected the notice to name what it was reading through',
+  )
+  // Every draw returns the cursor home, and the last write wipes the line: the table that
+  // follows must not be printed onto half a progress line.
+  assert.ok(drawn.every((text) => text.startsWith('\r')))
+  assert.match(drawn.at(-1), /^\r +\r$/)
 })

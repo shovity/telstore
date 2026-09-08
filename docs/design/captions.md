@@ -26,10 +26,33 @@
 - Walking costs what searching did in an ordinary chat and more in an extraordinary one: a
   backup is one manifest plus one message per chunk, so twenty backups of a few chunks each
   come back in a single request, and `list` stops the moment it has `--limit` of them.
-  `MAX_LIST_DOCUMENTS` (1000) is where it gives up, and there the wording changes — it names
-  what it read rather than making a claim about the whole chat. Verified against a real
-  account on 2026-09-08 across a backup of 123 chunks: page sizes of 100, 50 and 7 each
-  walked the same 124 documents, all distinct, all in order.
+  Verified against a real account on 2026-09-08 across a backup of 123 chunks: page sizes of
+  100, 50 and 7 each walked the same 124 documents, all distinct, all in order.
+
+- **The ceiling is a budget per backup asked for, not one number for every chat.** What the
+  walk reads through depends on how big the backups are, never on how many there are: it goes
+  from the newest message down and stops at `--limit` manifests, so the three thousandth
+  backup costs nothing because it is never reached. The chunks in between are the whole cost.
+  A flat 1000 was therefore wrong in both directions at once — twenty backups of 100GB need
+  1140 documents and got 1000, while `--limit 5` never needed more than 300. So
+  `DOCUMENTS_PER_BACKUP` (60, about a 105GB backup at the default chunk size) times `--limit`,
+  stopped at `MAX_LIST_DOCUMENTS` (10000) because `--limit` takes any whole number and
+  `--limit 100000` would otherwise ask for six million documents. `--search` uses the same
+  arithmetic with `RESULTS_PER_BACKUP` (20), since a result is already a manifest and the
+  budget only covers what `matchesTerm` throws away.
+
+- Reaching the ceiling changes the wording — it names what it read rather than making a claim
+  about the whole chat — and now names what to do next. "There may be older backups further
+  back" is true and offers nothing; `list --search <text>` reaches them without reading the
+  chunks in between. The hint is left off `--search`'s own output, where telling someone who
+  is already searching to search is noise.
+
+- `list` draws a one-line notice on **stderr** while a long read is in progress, and only onto
+  a terminal. Two thresholds, both deliberate: nothing for the first 400ms, because the usual
+  walk is a single 165ms request and a line drawn and wiped in the same breath is a flicker
+  rather than information; and stderr-and-TTY-only because `list` is a command people pipe
+  into `grep`, where a carriage return is rubbish — which is why it does not simply reuse the
+  upload bar, whose output is not piped anywhere.
 
 - `findManifestMessage` still searches, by backup id, because walking a chat to find one
   manifest that may be ten thousand messages back is not the same trade. That search was

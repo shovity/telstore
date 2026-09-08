@@ -32,12 +32,36 @@ function shorten(note) {
   return note.length > NOTE_WIDTH ? `${note.slice(0, NOTE_WIDTH - 1)}…` : note
 }
 
-// How far back list is willing to read. A backup is one manifest and one message per chunk,
-// so a chat of ordinary backups gives up its newest twenty in a single request; this ceiling
-// only bites where a few backups hold thousands of chunks between them, and there the answer
-// says what it looked at rather than pretending to have seen the whole chat. --search reads
-// the same number of results, where a result is already a manifest rather than any document.
-export const MAX_LIST_DOCUMENTS = 1000
+// What list has to read through depends on how big the backups are, not how many there are:
+// it walks from the newest message down and stops the moment it has --limit manifests, so the
+// three thousandth backup in a chat costs nothing because it is never reached. What costs is
+// the chunks in between — one message each — which is why the ceiling is a budget per backup
+// asked for rather than one number for every chat.
+//
+// 60 documents per backup covers a backup of about 105GB at the default chunk size. A fixed
+// 1000 was both too tight and too loose at once: twenty backups of 100GB need 1140 documents
+// and got 1000 of them, while `--limit 5` never needed more than 300.
+export const DOCUMENTS_PER_BACKUP = 60
+
+// A search result is already a manifest, so it buys far more backups per document read. Its
+// budget only has to cover what matchesTerm throws away — measured 2026-09-08, a term like
+// "2026-09" comes back matching everything and is then cut down to the month asked for.
+export const RESULTS_PER_BACKUP = 20
+
+// --limit takes any whole number, so the budget needs an end of its own: without one,
+// `--limit 100000` would ask for six million documents and sixty thousand requests.
+export const MAX_LIST_DOCUMENTS = 10000
+
+export function documentBudget(limit, perBackup) {
+  return Math.min(limit * perBackup, MAX_LIST_DOCUMENTS)
+}
+
+// Stopping at the ceiling used to leave the reader standing there: "there may be older backups
+// further back" is true and offers nothing to do about it. --search reaches them without
+// reading the chunks in between, which is the whole reason it exists.
+const DEEPER_HINT =
+  '"npx telstore list --search <text>" reaches older ones without reading every chunk ' +
+  'in between.'
 
 // Telegram matches whole words and nothing shorter: measured 2026-09-08, "projex" found
 // projex.zip while "proj", "pro" and "pr" each found nothing at all. That is the one way a
@@ -124,6 +148,37 @@ function matchesTerm(message, term) {
   return searchableFields(message).some((field) => field.toLowerCase().includes(term))
 }
 
+// A walk of one page is over in about the time it takes to notice — 165ms against a real
+// chat — and that is the usual case, so nothing is drawn for the first stretch: a line that
+// appears and is wiped in the same breath is a flicker, not information. Past that the read
+// is long enough that silence reads as the hang this project refuses everywhere else.
+//
+// \r only moves the cursor home, so every line is padded to the widest one drawn and the last
+// write wipes the row: the table that follows must never land on half a progress line.
+const NOTICE_QUIET_MS = 400
+const NOTICE_INTERVAL_MS = 200
+
+function createWalkNotice({ write, now, quietMs = NOTICE_QUIET_MS, intervalMs = NOTICE_INTERVAL_MS }) {
+  const startedAt = now()
+  let lastDrawnAt = 0
+  let widest = 0
+
+  return {
+    tick(text) {
+      if (now() - startedAt < quietMs) return
+      if (lastDrawnAt !== 0 && now() - lastDrawnAt < intervalMs) return
+
+      lastDrawnAt = now()
+      widest = Math.max(widest, text.length)
+      write(`\r${text.padEnd(widest)}`)
+    },
+    clear() {
+      if (widest === 0) return
+      write(`\r${' '.repeat(widest)}\r`)
+    },
+  }
+}
+
 function renderTable(rows) {
   // Most people never write a note, and a column of dashes tells them nothing they did not
   // already know while costing every other column the width it takes.
@@ -155,6 +210,11 @@ export async function runList(options = {}, deps = {}) {
     readDocuments = iterDocuments,
     searchManifests = iterManifestSearch,
     log = (line) => console.log(line),
+    // The notice is drawn on stderr, and only onto a terminal: unlike an upload's progress
+    // bar, `list` is a command people pipe into grep, and a carriage return in a log file is
+    // rubbish. Null means draw nothing at all.
+    writeProgress = process.stderr.isTTY ? (text) => process.stderr.write(text) : null,
+    now = () => Date.now(),
   } = deps
 
   const config = await loadConfig(configDir)
@@ -181,15 +241,24 @@ export async function runList(options = {}, deps = {}) {
   const found = []
   let read = 0
 
+  const unit = term ? 'search results' : 'documents'
+  const budget = documentBudget(settings.limit, term ? RESULTS_PER_BACKUP : DOCUMENTS_PER_BACKUP)
+
   const results = term
-    ? searchManifests(client, chat, term, { max: MAX_LIST_DOCUMENTS })
-    : readDocuments(client, chat, { max: MAX_LIST_DOCUMENTS })
+    ? searchManifests(client, chat, term, { max: budget })
+    : readDocuments(client, chat, { max: budget })
 
   const wanted = term === null ? null : term.toLowerCase()
+  const notice = writeProgress ? createWalkNotice({ write: writeProgress, now }) : null
 
   try {
     for await (const document of results) {
       read += 1
+
+      notice?.tick(
+        `Reading ${chatName(chat)}… ${read} ${unit}, ${found.length} backup` +
+          `${found.length === 1 ? '' : 's'}`,
+      )
 
       if (!document.fileName?.endsWith(MANIFEST_SUFFIX)) continue
       if (wanted !== null && !matchesTerm(document, wanted)) continue
@@ -202,13 +271,13 @@ export async function runList(options = {}, deps = {}) {
       if (found.length >= settings.limit) break
     }
   } finally {
+    notice?.clear()
     await closeQuietly(client, disconnect)
   }
 
   // The one thing either reader cannot see is what lies past its own ceiling, so anything it
   // says about the whole chat has to stop at the edge of what it read.
-  const capped = found.length < settings.limit && read >= MAX_LIST_DOCUMENTS
-  const unit = term ? 'search results' : 'documents'
+  const capped = found.length < settings.limit && read >= budget
 
   log(`Destination  ${describeChat(chat)}`)
   if (term) log(`Search       ${JSON.stringify(term)}`)
@@ -220,7 +289,7 @@ export async function runList(options = {}, deps = {}) {
     if (term) {
       log(
         capped
-          ? `No backups matching ${JSON.stringify(term)} in the newest ${MAX_LIST_DOCUMENTS} ` +
+          ? `No backups matching ${JSON.stringify(term)} in the newest ${budget} ` +
               `${unit} from ${chatName(chat)}. There may be older ones further back.`
           : `No backups matching ${JSON.stringify(term)} in ${chatName(chat)}.`,
       )
@@ -230,8 +299,8 @@ export async function runList(options = {}, deps = {}) {
 
     log(
       capped
-        ? `No backups in the newest ${MAX_LIST_DOCUMENTS} ${unit} of ${chatName(chat)}. ` +
-            'There may be older ones further back.'
+        ? `No backups in the newest ${budget} ${unit} of ${chatName(chat)}. ` +
+            `There may be older ones further back. ${DEEPER_HINT}`
         : `No backups found in ${chatName(chat)}. Upload one with: npx telstore <file>`,
     )
     return rows
@@ -248,8 +317,9 @@ export async function runList(options = {}, deps = {}) {
 
   if (capped) {
     log(
-      `Read the newest ${MAX_LIST_DOCUMENTS} ${unit} in ${chatName(chat)} to find them — ` +
-        `there may be older ${term ? 'matches' : 'backups'} further back.`,
+      `Read the newest ${budget} ${unit} in ${chatName(chat)} to find them — ` +
+        `there may be older ${term ? 'matches' : 'backups'} further back.` +
+        `${term ? '' : ` ${DEEPER_HINT}`}`,
     )
   }
 
