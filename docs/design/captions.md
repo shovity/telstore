@@ -121,3 +121,74 @@
   anticipated. That is why `list` still walks and only `--search` pays the index, why the
   empty search answer points back at `list`, and why anyone reading this before deleting the
   walk should assume the failure can return without warning.
+
+## What the index actually does (measured 2026-09-08)
+
+- **Telegram remembers a search's answer per chat and query string, and later messages do not
+  appear in it.** This is the mechanism the two dead explanations above were reaching for, and
+  it is the first one that survived an attempt to refute it. Measured in a throwaway broadcast
+  channel with a walk of the same chat as the control, three markers of different kinds — a
+  hashtag, a word in a caption, a word in a file name — each asked once while nothing carried
+  it, then posted on a document. All three still answered 0 at +5s, +25s, +30s and +60s, while
+  three identical markers that were *not* asked beforehand each answered 1 within five seconds.
+  A non-empty answer goes stale the same way: a word matching one document, asked, then given
+  two more documents, still answered 1 a minute later.
+
+- **That is what happened on 2026-09-07.** `list` searched `#telstore` in a channel where
+  nothing carried the tag yet, the empty answer was remembered, and every later `list` was
+  handed it back over a chat that by then was full of backups. The 2026-09-08 probe failed to
+  reproduce it for the reason that looked like luck at the time: nobody searched the tag before
+  the uploads existed. Neither did today's fresh channel, and it answered correctly from 1.6
+  minutes old through 18 minutes. **The condition is asking too early, not the chat being
+  young.** A person setting a chat and running `list` to see whether it is empty does exactly
+  that, which is why this is worth naming rather than filing under bad luck.
+
+- **How long it lasts is not known.** In the e2e channel, `#telstore` was asked at 11:39 while
+  the channel was empty, 52 documents were seeded within three minutes, and the query still
+  answered 0 at 11:51 and answered 4 at 11:53 — about thirteen minutes. The 2026-09-07 record
+  has the same failure lasting hours. One observation of thirteen minutes does not bound it,
+  and nothing here says what decides the difference.
+
+- **The case quirk is a consequence of this, not a second effect.** `#Telstore` answered 5 in
+  the same session where `#telstore` answered 0: a different query string is a different key,
+  not a different index. Do not read it as "hashtags go somewhere separate" — a hashtag this
+  chat had never seen was found by its exact lowercase form within three seconds, in the same
+  chat, in the same minute that `#telstore` was answering 0.
+
+- **Telegram indexes the document file name, not only the caption.** `manifest`,
+  `.manifest.json` and `json` each returned all five manifests and no chunk in a chat whose
+  manifest captions contain none of those words. This matters because a caption is text a
+  person can edit and a file name is not. One manifest had its `#telstore` line and its
+  `↩ npx telstore restore` line removed by hand: ten to thirteen minutes later `#Telstore`,
+  `npx` and `npx telstore restore` had each dropped from 5 to 4, while `manifest` and
+  `.manifest.json` stayed at 5 and the walk stayed at 5. `findManifestMessage` still found the
+  backup, because it searches the id and the id is in the file name.
+
+- **The walk's budget is defeated by documents telstore did not write.** `DOCUMENTS_PER_BACKUP`
+  assumes every document in the chat is a manifest or a chunk, and that assumption is the whole
+  of the ceiling. Measured with five one-chunk backups among 112 foreign documents, 70 of them
+  newer than the newest manifest: `list --limit 1` (budget 60) printed "No backups in the newest
+  60 documents" over five restorable backups, while `--limit 2` (budget 120) listed them.
+  Walking to all five read 113 documents in 2 requests and discarded 108 of them — 96% of the
+  read belonged to somebody else. The tag search read 5 in 1 request, 70-100ms against 320-590ms.
+
+- **Query shapes, e2e channel, three runs each, all identical.** `npx`, `restore`,
+  `npx telstore restore`, `manifest`, `.manifest.json` and `json` each returned exactly the
+  manifests and no chunk. `telstore` returned 11 — every manifest and every chunk, because a
+  chunk caption carries the id and Telegram splits it on the hyphen. `npx #telstore` returned
+  the manifests; `#telstore npx` returned nothing, which is the "tag goes last" rule above and
+  is a parse rule rather than an index one.
+
+- **What this means for a search-backed `list`, and why the walk stays.** A remembered answer
+  is indistinguishable from a current one, including a remembered answer that is *full*: a
+  chat that had twenty backups when the query was last asked and has twenty-five now would hand
+  back the older twenty and look complete. So a reader that searches and stops at `--limit`
+  hits can silently omit the newest backups, which is the failure this project exists to
+  refuse. Falling back to a walk when the search looks short does not fix it either — the
+  stale answer need not look short.
+
+- **Limits of all of the above.** One account, one session, two chats, both small; the largest
+  had 122 documents. Nothing here measures a chat with thousands of backups, and the timings
+  are that session's. The remembered-answer lifetime was watched once. What it does *not*
+  explain is why 2026-09-07 lasted hours when 2026-09-08 lasted thirteen minutes, and anyone
+  building on this should treat that gap as unexplained rather than rounding it to a number.
