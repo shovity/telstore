@@ -419,6 +419,20 @@ test('a stream record whose manifest went out is not said to have none', async (
   assert.match(text, /the manifest its record names/)
 })
 
+// delete's stateManifestId reads the same field and treats null exactly as absent, so a
+// record carrying an explicit null must not have status promising a manifest that delete
+// then reports finding no record of. One record, one answer, whichever command is asked.
+test('a stream record whose manifest id is null is described as having none', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+  await saveStream(configDir, { manifestMsgId: null })
+
+  const text = await report(configDir)
+
+  assert.match(text, /with no manifest naming them/)
+  assert.doesNotMatch(text, /the manifest its record names/)
+})
+
 // status is the command someone runs *because* something is wrong, so a record a truncated
 // write or a hand edit mangled is nearer its normal case than its edge case.
 test('a stream record that does not name what produced it prints no undefined', async () => {

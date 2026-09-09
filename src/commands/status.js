@@ -286,8 +286,14 @@ export async function runStatus(options = {}, deps = {}) {
       // that could not finish writes the card's id here. status asks Telegram nothing in this
       // block, so it reports the record's claim as the record's claim rather than as a fact
       // about the chat, which is the same care delete takes when its search comes up empty.
+      //
+      // `== null` rather than `=== undefined`, because delete's stateManifestId reads this
+      // same field and treats null and absent alike. A record carrying an explicit null — a
+      // hand edit, or a writer that spelled "nothing here" out — would otherwise have status
+      // promise a manifest while delete reports none: two commands contradicting each other
+      // about one record, which is the failure this whole block exists to end.
       const manifest =
-        state.manifestMsgId === undefined
+        state.manifestMsgId == null
           ? 'with no manifest naming them'
           : 'and the manifest its record names'
 
