@@ -139,6 +139,11 @@ Peak extra disk is one chunk. Peak extra memory is one part.
   and `tar` writing nothing usually means the arguments were wrong.
 - The manifest gets `size` = total bytes read and `name` = the name given. No new field, so
   `MANIFEST_VERSION` stays 1 and an older telstore restores these backups perfectly.
+- **Chunk captions lose their total.** `chunkCaption` writes `\u{1F4E6} <id> \u00b7 3/12`, and a stream
+  does not know the 12 until the last chunk. Stream chunks are captioned `\u{1F4E6} <id> \u00b7 3`
+  instead. Nothing parses a chunk caption \u2014 `list` reads the manifest's card and `restore`
+  reads the manifest \u2014 so this changes only what a person scrolling the chat sees, and the
+  manifest card still carries the final count.
 
 ## Upload: what happens when it goes wrong
 
