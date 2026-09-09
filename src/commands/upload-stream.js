@@ -263,9 +263,15 @@ export async function runStreamUpload(name, childArgv, options = {}, deps = {}) 
         for (;;) {
           const file = path.join(tmp, `${id}-${count}.chunk`)
 
-          // Before the open, not after it: 'w+' creates the file, so an open that fails
-          // having created it would otherwise leave a name nobody outside this loop knows.
+          // Said before the open rather than after it, so the handler holds the name for the
+          // whole window in which a file can exist: 'w+' creates it, and a second Ctrl-C
+          // landing while the open is in flight would otherwise find nothing to remove.
           // Unlinking a file that was never made is an ENOENT the caller ignores.
+          //
+          // What this does not cover, and it looks as though it should: an open that creates
+          // the file and then throws leaves the loop without entering the `try` below, so the
+          // `finally` that removes it never runs and nothing on that path reads the name back.
+          // `status` is what catches that one, with every other ending no handler sees.
           onTempChunk(file)
 
           const handle = await fs.open(file, 'w+')

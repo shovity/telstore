@@ -864,3 +864,41 @@ test('a tmp directory that cannot be read is named, and does not stop the report
   assert.match(text, new RegExp(`${tempDirFor(configDir)} could not be read`))
   assert.match(text, /holding up to a whole chunk/)
 })
+
+// The early return this task removed, one layer up: the temp listing prints last, so anything
+// that stops short of it takes it with it. `telstore status | head` is the reachable version —
+// the pipe closes under a write partway down a record block — and a damaged record that learns
+// to throw later would be the other. Either way one bad record must not hide 1.8GB of disk.
+test('a record block that dies mid-print does not take the buffered chunks with it', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+  await saveStream(configDir)
+  await saveTempChunk(configDir, 'telstore-1-3.chunk', 1024)
+
+  const lines = []
+
+  await assert.rejects(
+    () =>
+      runStatus(
+        {},
+        {
+          configDir,
+          connect: async () => fakeClient(),
+          disconnect: async () => {},
+          log: (line) => {
+            // The write that fails is the record's own heading, which is the first thing the
+            // block prints — so nothing of the listing below it is reached either.
+            if (line.includes('telstore-1') && !line.includes('.chunk')) {
+              throw new Error('EPIPE: broken pipe')
+            }
+
+            lines.push(line)
+          },
+        },
+      ),
+    /broken pipe/,
+  )
+
+  assert.match(lines.join('\n'), /telstore-1-3\.chunk/)
+  assert.match(lines.join('\n'), /rm /)
+})

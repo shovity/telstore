@@ -314,11 +314,18 @@ export async function runStatus(options = {}, deps = {}) {
     tempError = err.message
   }
 
-  if (uploads.length > 0 || restores.length > 0) {
-    for (const line of await unfinishedLines(uploads, restores, settings)) log(line)
+  // In a `finally`, so one damaged record — or a `telstore status | head` that closes the pipe
+  // under the write — cannot hide up to 1.8GB of borrowed disk. That is the early `return` this
+  // task removed, one layer up: the listing came last, so anything that stopped short of it took
+  // it with it, and status is the command someone runs *because* something is already wrong. The
+  // error still leaves by its own route; it just does not leave alone.
+  try {
+    if (uploads.length > 0 || restores.length > 0) {
+      for (const line of await unfinishedLines(uploads, restores, settings)) log(line)
+    }
+  } finally {
+    for (const line of tempChunkLines(temp, configDir, tempError)) log(line)
   }
-
-  for (const line of tempChunkLines(temp, configDir, tempError)) log(line)
 }
 
 // Everything below the rows: one indented block per unfinished transfer, newest first.

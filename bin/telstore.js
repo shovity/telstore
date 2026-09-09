@@ -42,13 +42,23 @@ let leaving = false
 // own on every ending it gets to run code for; this exists for the one ending it does not.
 let tempChunk = null
 
-// What a Ctrl-C that will not wait can still do about that file, and it has to be exactly
-// this shape. `unlinkSync` is one local syscall — microseconds, no socket, nothing that can
-// hang — where anything awaited here would be waiting on the very run this exit exists to
-// stop waiting for. Removing a file that is still being written into is not a problem where
-// it matters: on POSIX the name goes now and the space comes back when this process dies,
-// which is immediately. A platform that refuses to unlink an open file leaves the user with
-// a file holding up to a whole chunk, so that ending — and only that ending — prints.
+// What a Ctrl-C that will not wait can still do about that file, and it has to be exactly this
+// shape: local and unawaited, because anything awaited here would be waiting on the very run
+// this exit exists to stop waiting for. `unlinkSync` holds no handle, opens no socket and
+// cannot hang. Removing a file this process still has open is not a problem where it matters
+// either: on POSIX the name goes now and the space comes back as the process dies. A platform
+// that refuses to unlink an open file leaves the user with a file holding up to a whole chunk,
+// so that ending — and only that ending — prints.
+//
+// It is not free, though, and "one syscall" is the wrong number to quote. Three costs, and
+// they are three different numbers: the call removes a name and returns in microseconds; the
+// goodbye line still reaches the terminal in about 1.2ms; and then the extents are freed at
+// the *last close*, which is process teardown. Measured on ext4, SIGINT to exit, file still
+// open: 60-100ms against 29-43ms for a 64MB chunk, 596-658ms against 45-56ms at 512MB, and
+// 1131-1646ms against 45-64ms at the default 1792MB — so at default settings the prompt comes
+// back about a second after the message does. Nothing avoids that second: whoever runs `rm`
+// on the leftover instead pays the same teardown. docs/design/data-integrity.md has the
+// conditions.
 //
 // Silence on success is the point rather than an omission: the rule is that nothing telstore
 // leaves behind goes unnamed, and this leaves nothing behind.

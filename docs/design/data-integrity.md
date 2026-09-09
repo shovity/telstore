@@ -117,27 +117,62 @@
   and the file stayed. It was the same leak a `SIGKILL` leaves, on a path telstore prints
   instructions for.
 
-  **Closed on the leave-now path by one syscall, and named everywhere else.** The run tells
+  **Closed on the leave-now path by one unlink, and named everywhere else.** The run tells
   `bin/telstore.js` which file it is buffering into (`onTempChunk`, said before the open and
   unsaid after `discard`), and every exit the SIGINT handler leads to — the second Ctrl-C, the
   cleanup deadline running out, a Ctrl-C on a run with nothing to unwind — `unlinkSync`s it on
   the way past. That shape is forced, not chosen: the second Ctrl-C exists precisely because
   the user will not wait for something that talks to the network, so the only thing allowed
-  here is local and unawaited. Microseconds, no socket, nothing that can hang. Unlinking a
-  file this process still has open is not a problem where it matters — on POSIX the name goes
-  now and the space comes back as the process dies, which is immediately — and a platform that
+  here is local and unawaited: `unlinkSync` holds no handle, opens no socket and cannot hang.
+  Unlinking a file this process still has open is not a problem where it matters either — on
+  POSIX the name goes now and the space comes back as the process dies — and a platform that
   refuses to unlink an open file gets the leftover named on stderr instead, because a file
   holding up to a whole chunk is not narration a `--silent` asked to be spared.
+
+  **It is not free, and "one syscall" is the wrong number to quote.** Three costs, measured
+  2026-09-09 on ext4, timing SIGINT to process exit with the chunk file still open: the
+  `unlink` call itself removes a name and returns in microseconds; the goodbye line still
+  reaches the terminal in about 1.2ms, unchanged; and then the extents are freed at the **last
+  close**, which is process teardown, which is not microseconds at all.
+
+  | chunk | exit keeping the file | exit unlinking it |
+  | --- | --- | --- |
+  | 64MB | 29-43ms | 60-100ms |
+  | 512MB | 45-56ms | 596-658ms |
+  | 1792MB (the default) | 45-64ms | 1131-1646ms |
+
+  So at default settings the shell prompt comes back **about a second after** the message
+  does, on a path whose whole point is that the user will not wait. It is still the right
+  trade, because nothing avoids that second: whoever runs `rm` on the leftover instead pays
+  exactly the same teardown, having first had to be told the file was there. What is not
+  acceptable is claiming otherwise in a comment, which this file did until it was measured.
+
+  Reproduced independently the same day, on the same ext4, by timing a child from "the file is
+  written" to `exit`: **92-113ms against 20-23ms at 64MB, and 275-596ms against 8-9ms at
+  512MB**. The order of magnitude and the direction hold; the spread inside a size does not,
+  because it moves with what the page cache is already holding. So the table is the shape of
+  the cost, not a number to promise anyone — and it is one filesystem's. An fs that frees
+  extents lazily would answer differently again.
 
   **The general case is a listing, not a sweep.** A SIGKILL, a crash or a machine losing power
   still strands a chunk file, and nothing in a signal handler can help there. So `status` reads
   `~/.telstore/tmp` and prints what is in it — each file, what it holds, the total, and an `rm`
   — after the unfinished records rather than before, on the same run that says "Unfinished
-  none", which is the report the e2e leftovers hid behind. What it deliberately does not do is
-  remove them: from outside the run that owns one, a chunk being filled right this second and a
+  none", which is the report the e2e leftovers hid behind. Printed from a `finally`, because a
+  listing that comes last is a listing anything stopping short of it takes with it: one damaged
+  record, or a `telstore status | head` closing the pipe partway down a block, would otherwise
+  hide up to 1.8GB exactly as the early `return` this replaced did. What it deliberately does
+  not do is remove them: from outside the run that owns one, a chunk being filled now and a
   chunk left by a run that died are the same file, and a startup sweep that guessed would
   destroy a live upload's buffer to tidy up. Naming it and leaving the decision to the person
   is the same choice `down` makes about the files it did not put in the directory.
+
+  The two *could* be made to look different — a pid in the file name, an advisory `flock` the
+  owning run holds — and then a sweep would be safe. That was seen and not taken: it buys an
+  automatic removal of something the user can already remove with the `rm` this report prints,
+  in exchange for a second thing that has to stay true across every ending (a pid is reused,
+  a lock is not held by a machine that lost power), and telstore would be deciding on its own
+  to delete a file. If a sweep is ever wanted, this is the door to it.
 
 - `verify` exists because nothing else answers "is this backup still restorable" without
   downloading it. It asks the chat about every chunk message the manifest names — still
