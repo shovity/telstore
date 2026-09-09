@@ -3,8 +3,13 @@ import path from 'node:path'
 
 import { MAX_CHUNKS, PART_SIZE } from '../chunking.js'
 import { chunkCaption, manifestCaption, parseNote } from '../caption.js'
-import { describeChat } from '../chat.js'
-import { closeQuietly, connect as realConnect } from '../client.js'
+import { chatName, describeChat } from '../chat.js'
+import {
+  MESSAGE_BATCH_SIZE,
+  closeQuietly,
+  connect as realConnect,
+  deleteMessages as realDeleteMessages,
+} from '../client.js'
 import { configFile, defaultConfigDir, loadConfig } from '../config.js'
 import {
   buildManifest,
@@ -13,7 +18,7 @@ import {
   newBackupId,
   serializeManifest,
 } from '../manifest.js'
-import { createStreamProgress, formatBytes } from '../progress.js'
+import { createStreamProgress, formatBytes, plural } from '../progress.js'
 import { requireChat, resolveSettings } from '../settings.js'
 import { spawnProducer } from '../spawn.js'
 import {
@@ -39,7 +44,12 @@ export function tempDirFor(configDir) {
 // must not be what stops the unlink — the file would sit there holding a whole chunk that
 // nothing will ever remove — and a removal that fails must not replace the error already on
 // its way out of the loop, so it is said on stderr rather than thrown.
-async function discard(handle, file, { warn, chunkSize }) {
+//
+// On writeErr rather than warn, like the prune report and for the same reason: a leaked file
+// holding up to 1.8GB is not narration about a transfer that --silent asked to be spared. It
+// is telstore leaving something on this machine that only the user can now clear up, and a
+// caller silencing the progress bar has not asked to be kept in the dark about that.
+async function discard(handle, file, { writeErr, chunkSize }) {
   try {
     await handle.close()
   } catch {
@@ -49,7 +59,7 @@ async function discard(handle, file, { warn, chunkSize }) {
   try {
     await fs.rm(file, { force: true })
   } catch (err) {
-    warn(
+    writeErr(
       `\nCould not remove the temporary chunk file ${file}: ${err.message}. It holds up to ` +
         `${formatBytes(chunkSize)} and telstore will not try again — remove it by hand.\n`,
     )
@@ -76,6 +86,7 @@ export async function runStreamUpload(name, childArgv, options = {}, deps = {}) 
     // will ever reach.
     maxChunks = MAX_CHUNKS,
     spawn = spawnProducer,
+    deleteMessages = realDeleteMessages,
     retryOptions = {},
     writeErr = (line) => process.stderr.write(line),
     log: writeLog = (line) => console.log(line),
@@ -121,14 +132,70 @@ export async function runStreamUpload(name, childArgv, options = {}, deps = {}) 
   const warn = silent ? () => {} : writeErr
   const onRetry = createOnRetry(warn)
 
+  // Every message id this run has put in the chat, in the order it put them there. The record
+  // on disk is the durable copy, for the run that dies without getting this far; this one is
+  // what rollback reaches for, because it is right even when the write to disk is the thing
+  // that failed.
+  const sent = []
+  let client = null
+
+  // A file upload keeps its chunks on purpose — a second run resumes onto them. A stream
+  // cannot be resumed: the bytes have gone past, and the next run cuts them differently. So a
+  // chunk left in the chat by a failed stream is a chunk nothing will ever point at again,
+  // sitting in somebody's Telegram with no manifest naming it. Removing them is part of
+  // failing, not a courtesy. Always throws.
+  async function rollback(err) {
+    if (sent.length === 0) {
+      // Cleared even when it names nothing. An empty record is useless, but it still counts
+      // against MAX_STATES exactly as a full one does — so leaving it behind can evict the
+      // record of a real upload whose chunks are still in a chat, which is the loss
+      // pruneStates goes out of its way to announce.
+      await clearState(key, configDir)
+      throw err
+    }
+
+    warn(`\nRemoving the ${plural(sent.length, 'chunk')} this run already sent...\n`)
+
+    const loud = sent.length > MESSAGE_BATCH_SIZE
+    let removed = 0
+
+    try {
+      await deleteMessages(client, chat, sent, {
+        retryOptions: { ...retryOptions, onRetry },
+        onBatch: (done, total) => {
+          removed = done
+          if (loud) warn(`\rRemoving chunk messages ${done}/${total}…`)
+        },
+      })
+    } catch (cleanupErr) {
+      // The record stays, and deliberately: it is the only list of these message ids, since
+      // there is no manifest in the chat and there never will be one. `delete` reads exactly
+      // this record through findStates when it finds no manifest, which is why that is the
+      // command to name. The original failure is still said first — the rollback is what
+      // happened next, not what went wrong.
+      throw new Error(
+        `${err.message}\n\ntelstore then removed ${removed} of the ` +
+          `${plural(sent.length, 'chunk')} it had sent before Telegram refused: ` +
+          `${cleanupErr.message}. The rest are still in ${chatName(chat)} with no manifest ` +
+          `pointing at them. Run "npx telstore delete ${id}" to remove them.`,
+      )
+    }
+
+    if (loud) warn('\n')
+
+    await clearState(key, configDir)
+
+    throw err
+  }
+
   log(`Backup ${id}`)
   log(`Name   ${name} (chunks of ${formatBytes(chunkSize)})`)
   log(`From   ${childArgv.join(' ')}`)
   log(`To     ${describeChat(chat)}\n`)
 
-  const client = await connect(config, { verbose: settings.verbose })
-
   try {
+    client = await connect(config, { verbose: settings.verbose })
+
     const tmp = tempDirFor(configDir)
     await fs.mkdir(tmp, { recursive: true })
 
@@ -202,6 +269,11 @@ export async function runStreamUpload(name, childArgv, options = {}, deps = {}) 
                 caption: chunkCaption({ id, number: count + 1, total: null }),
               })
 
+              // Before the record is written, not after: a chunk is in the chat the instant
+              // sendChunk returns, and a saveState that throws must not be what hides it
+              // from the rollback that is about to run.
+              sent.push(message.id)
+
               // Recorded the moment it lands, because from here on this record is the only
               // list of what is in the chat under this id.
               state = await markChunkDone(
@@ -216,7 +288,7 @@ export async function runStreamUpload(name, childArgv, options = {}, deps = {}) 
               count += 1
             }
           } finally {
-            await discard(handle, file, { warn, chunkSize })
+            await discard(handle, file, { writeErr, chunkSize })
           }
 
           if (eof) break
@@ -281,12 +353,28 @@ export async function runStreamUpload(name, childArgv, options = {}, deps = {}) 
     } finally {
       // A run that fell over mid-chunk leaves the producer alive and blocked writing into a
       // pipe nobody is reading. Killing it is not rollback — it is closing the door this
-      // function opened.
-      if (!ended) child.kill()
+      // function opened, and the door is more than the process: the abandoned iterator still
+      // holds stdout, so a child that outlives the signal goes on waiting on a pipe whose
+      // reader is never coming back. Returning the iterator releases it and destroys the
+      // stream, which turns that wait into an EPIPE the child can actually act on.
+      if (!ended) {
+        child.kill()
+        await reader.close()
+      }
     }
+  } catch (err) {
+    // Always throws: err itself once the chat is clean again, or a report of the rollback
+    // that could not finish.
+    await rollback(err)
   } finally {
-    await closeQuietly(client, disconnect, (err) =>
-      warn(`\nWarning: could not close the Telegram connection: ${err.message}\n`),
-    )
+    // connect is inside the try now, because a rollback needs a live client and the finally
+    // that closes one has to run after it. So a connect that failed leaves nothing to close,
+    // and a warning about closing a client that never existed would bury the real reason the
+    // run stopped.
+    if (client) {
+      await closeQuietly(client, disconnect, (err) =>
+        warn(`\nWarning: could not close the Telegram connection: ${err.message}\n`),
+      )
+    }
   }
 }

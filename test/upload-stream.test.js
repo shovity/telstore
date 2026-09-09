@@ -57,6 +57,15 @@ function streamDeps(client, ws, extra = {}) {
     configDir: ws.configDir,
     partSize: 4,
     silent: true,
+    // Rollback really removes. A fake that only counted calls would let "the chat is empty
+    // afterwards" be asserted about a list of arguments rather than about the chat, which is
+    // the only thing the property is actually about.
+    deleteMessages: async (_client, _peer, ids) => {
+      for (const id of ids) {
+        const at = client.messages.findIndex((message) => message.id === id)
+        if (at !== -1) client.messages.splice(at, 1)
+      }
+    },
     ...extra,
   }
 }
@@ -295,8 +304,8 @@ test('the manifest is not sent when the command exits non-zero', async () => {
     /tar exited 2 after writing 15 B.*not sending the manifest/s,
   )
 
-  assert.equal(chunkMessages(client).length, 2)
   assert.deepEqual(manifestMessages(client), [])
+  assert.deepEqual(chunkMessages(client), [])
 })
 
 test('the manifest is not sent when the command is killed by a signal', async () => {
@@ -439,6 +448,255 @@ test('a run that fails leaves no temporary chunk file behind', async () => {
   assert.deepEqual(await fs.readdir(ws.tmp), [])
 })
 
+// A leaked temporary chunk file holds up to a whole chunk — 1.8GB by default — and telstore
+// will never try again. That is not narration about a transfer, so it has to reach the user
+// even when the caller asked for silence, the same way the prune report does.
+test('a temporary chunk file that could not be removed is named even in silence', async () => {
+  const ws = await workspace()
+  const client = fakeClient()
+  const errors = []
+  let id = null
+
+  // Replacing the open file with a directory of the same name is a removal fs.rm refuses
+  // (ERR_FS_EISDIR) without touching the fd the chunk is still being written through.
+  const between = async () => {
+    const file = path.join(ws.tmp, `${id}-1.chunk`)
+    await fs.unlink(file)
+    await fs.mkdir(file)
+  }
+
+  await runStreamUpload(
+    'a.tar',
+    ['tar', 'cf', './a'],
+    { 'chunk-size': '10' },
+    streamDeps(client, ws, {
+      spawn: fakeSpawn([TEN, FIVE], { between }),
+      silent: true,
+      writeErr: (line) => errors.push(line),
+      onBackupId: (backupId) => {
+        id = backupId
+      },
+    }),
+  )
+
+  assert.match(errors.join(''), /Could not remove the temporary chunk file/)
+  assert.match(errors.join(''), /remove it by hand/)
+})
+
+// A file upload keeps its chunks on purpose, because a second run resumes onto them. A stream
+// cannot be resumed — the bytes have gone past — so a chunk left in the chat is a chunk
+// nothing will ever point at again. Removing them is part of failing, not a courtesy.
+test('a producer that dies leaves nothing behind in the chat', async () => {
+  const ws = await workspace()
+  const client = fakeClient()
+  const deps = streamDeps(client, ws, { spawn: fakeSpawn([TEN, TEN], { code: 2 }) })
+  const sent = []
+  const removed = []
+
+  await assert.rejects(
+    () =>
+      runStreamUpload('a.tar', ['tar', 'cf', './a'], { 'chunk-size': '10' }, {
+        ...deps,
+        sendChunk: async (...args) => {
+          const message = await deps.sendChunk(...args)
+          sent.push(message.id)
+          return message
+        },
+        deleteMessages: async (...args) => {
+          removed.push(...args[2])
+          return await deps.deleteMessages(...args)
+        },
+      }),
+    /exited 2/,
+  )
+
+  assert.equal(sent.length, 2)
+  assert.deepEqual(removed, sent)
+  assert.deepEqual(client.messages, [])
+})
+
+test('the record goes when the rollback succeeds', async () => {
+  const ws = await workspace()
+  const client = fakeClient()
+  let id = null
+
+  await assert.rejects(
+    () =>
+      runStreamUpload(
+        'a.tar',
+        ['tar', 'cf', './a'],
+        { 'chunk-size': '10' },
+        streamDeps(client, ws, {
+          spawn: fakeSpawn([TEN, TEN], { code: 2 }),
+          onBackupId: (backupId) => {
+            id = backupId
+          },
+        }),
+      ),
+    /exited 2/,
+  )
+
+  assert.deepEqual(await findStates(id, ws.configDir), [])
+})
+
+// A run that sent nothing still wrote a record, and a useless record counts against
+// MAX_STATES exactly as a real one does — so it can evict the record of an upload whose
+// chunks are still sitting in a chat.
+test('a run that sent nothing clears its record too', async () => {
+  const ws = await workspace()
+  const client = fakeClient()
+  let id = null
+
+  await assert.rejects(
+    () =>
+      runStreamUpload(
+        'a.tar',
+        ['true'],
+        {},
+        streamDeps(client, ws, {
+          spawn: fakeSpawn([]),
+          onBackupId: (backupId) => {
+            id = backupId
+          },
+        }),
+      ),
+    /wrote nothing/,
+  )
+
+  assert.deepEqual(await findStates(id, ws.configDir), [])
+  assert.deepEqual(await fs.readdir(path.join(ws.configDir, 'state')), [])
+})
+
+// The record is the only list of those message ids, so when telstore cannot remove them
+// itself it must keep the one thing that can, and say what to run.
+test('a rollback that fails keeps the record and says what to run', async () => {
+  const ws = await workspace()
+  const client = fakeClient()
+  let id = null
+
+  await assert.rejects(
+    () =>
+      runStreamUpload(
+        'a.tar',
+        ['tar', 'cf', './a'],
+        { 'chunk-size': '10' },
+        streamDeps(client, ws, {
+          spawn: fakeSpawn([TEN, TEN], { code: 2 }),
+          deleteMessages: async () => {
+            throw new Error('connection dropped')
+          },
+          onBackupId: (backupId) => {
+            id = backupId
+          },
+        }),
+      ),
+    (err) => {
+      // The original failure is still the first thing said: the rollback is what happened
+      // next, not what went wrong.
+      assert.match(err.message, /exited 2/)
+      assert.match(err.message, /connection dropped/)
+      assert.match(err.message, new RegExp(`npx telstore delete ${id}`))
+      assert.match(err.message, /telstore delete telstore-/)
+      return true
+    },
+  )
+
+  const records = await findStates(id, ws.configDir)
+
+  assert.equal(records.length, 1)
+  assert.deepEqual(
+    Object.values(records[0].state.done).map((entry) => entry.msgId),
+    chunkMessages(client).map((message) => message.id),
+  )
+})
+
+test('a chunk that Telegram refuses rolls back the chunks before it', async () => {
+  const ws = await workspace()
+  const client = fakeClient({ failOnChunk: 1 })
+  let id = null
+
+  await assert.rejects(
+    () =>
+      runStreamUpload(
+        'a.tar',
+        ['tar', 'cf', './a'],
+        { 'chunk-size': '10' },
+        streamDeps(client, ws, {
+          spawn: fakeSpawn([TEN, TEN, FIVE]),
+          onBackupId: (backupId) => {
+            id = backupId
+          },
+        }),
+      ),
+    /connection dropped mid-transfer/,
+  )
+
+  assert.deepEqual(client.messages, [])
+  assert.deepEqual(await findStates(id, ws.configDir), [])
+})
+
+// The subtlest half of "a manifest only when EOF and exit 0 agree": the command can exit 0
+// while the stream itself ended in an error. ChunkReader's sticky error is the only thing
+// standing between that and a manifest describing a truncated archive.
+test('a stream that ends in an error sends no manifest even when the command exits 0', async () => {
+  const ws = await workspace()
+  const client = fakeClient()
+
+  async function* failing() {
+    yield TEN
+    throw new Error('input/output error on the pipe')
+  }
+
+  const spawn = () => ({
+    stdout: failing(),
+    exited: Promise.resolve({ code: 0, signal: null }),
+    kill: () => {},
+  })
+
+  await assert.rejects(
+    () =>
+      runStreamUpload(
+        'a.tar',
+        ['tar', 'cf', './a'],
+        { 'chunk-size': '10' },
+        streamDeps(client, ws, { spawn }),
+      ),
+    /input\/output error on the pipe/,
+  )
+
+  assert.deepEqual(manifestMessages(client), [])
+  assert.deepEqual(client.messages, [])
+})
+
+// Killing the child is not enough on its own: the abandoned iterator still holds the pipe,
+// and a producer blocked writing into a pipe nobody reads can outlive the signal.
+test('a run that fails stops reading the producer, not just kills it', async () => {
+  const ws = await workspace()
+  const client = fakeClient({ failOnChunk: 1 })
+  const stdout = Readable.from([TEN, TEN, TEN])
+  const killed = []
+
+  const spawn = () => ({
+    stdout,
+    exited: new Promise(() => {}),
+    kill: (signal = 'SIGTERM') => killed.push(signal),
+  })
+
+  await assert.rejects(
+    () =>
+      runStreamUpload(
+        'a.tar',
+        ['tar', 'cf', './a'],
+        { 'chunk-size': '10' },
+        streamDeps(client, ws, { spawn }),
+      ),
+    /connection dropped mid-transfer/,
+  )
+
+  assert.deepEqual(killed, ['SIGTERM'])
+  assert.equal(stdout.destroyed, true)
+})
+
 // A stream cannot be re-cut, so the only way out of an endless producer is a bigger chunk.
 test('more chunks than the limit stops the run and names --chunk-size', async () => {
   const ws = await workspace()
@@ -455,8 +713,9 @@ test('more chunks than the limit stops the run and names --chunk-size', async ()
     /already produced 3 chunks of 10 B.*larger --chunk-size/s,
   )
 
-  assert.equal(chunkMessages(client).length, 3)
-  assert.deepEqual(manifestMessages(client), [])
+  // The next run cuts the same stream into different chunks, so the three already sent can
+  // never be part of any backup: they go with everything else this run put in the chat.
+  assert.deepEqual(client.messages, [])
 })
 
 test('a stream that ends exactly on the limit is not one chunk over it', async () => {

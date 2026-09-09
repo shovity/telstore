@@ -78,4 +78,20 @@ export class ChunkReader {
 
     return { bytes, eof: this.ended && this.pending === null }
   }
+
+  // What a failed upload calls on the way out. The iterator is abandoned mid-stream then, and
+  // it is the iterator — not the caller — that holds the source open: returning it is what
+  // releases the stream, so a producer blocked writing into a pipe nobody is reading stops
+  // being blocked. Nothing it has to say can matter by then, because an error is already on
+  // its way out of the caller, so a refusal to close is swallowed rather than thrown over it.
+  async close() {
+    this.ended = true
+    this.pending = null
+
+    try {
+      await this.iterator.return?.()
+    } catch {
+      // Nothing here can change what already went wrong.
+    }
+  }
 }
