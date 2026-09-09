@@ -105,11 +105,11 @@ that the user did not ask for, nothing reported gone that is still there.
     slack only ever has to be able to point downwards.
   Requiring both makes each one's blind spot the other's problem: an id floor lifted by an
   edited record is held down by the date, and a date floor lifted by a wrong clock is held
-  down by the id. It costs one extra day of documents read, which is the cheapest thing in
-  this entry, and the alternative was writing "a hand-edited record can hide chunks" into this
-  file as though naming a hole were the same as closing one. Where only one floor exists — an
-  id telstore did not mint carries no day — it decides alone, and where neither does there is
-  only the budget.
+  down by the id. What it costs is a day of the chat's own traffic, priced in the cost bullet
+  below rather than waved at here, and the alternative was writing "a hand-edited record can
+  hide chunks" into this file as though naming a hole were the same as closing one. Where only
+  one floor exists — an id telstore did not mint carries no day — it decides alone, and where
+  neither does there is only the budget.
   - *`MAX_DELETE_DOCUMENTS`, 20000.* Its own number rather than `list`'s `MAX_LIST_DOCUMENTS`,
     which is exactly 10000 and would stop this walk one document short of the largest backup
     telstore makes: `MAX_CHUNKS` chunks with a manifest over them is 10,001 documents of
@@ -126,10 +126,21 @@ that the user did not ask for, nothing reported gone that is still there.
 - **Every delete walks, not only the ones a record calls a stream.** The gate would have been
   cheap to write and it would have covered the measured case exactly, which is the argument
   against it: the file path has its own way of stranding a chunk (above), and a rule shaped
-  around the one leak that has been seen is a rule that misses the next one. The cost is
-  bounded by the backup's own footprint — roughly one read per hundred chunks, against a
-  command that is already sending one delete per hundred — because both ends of the walk are
-  the backup's own messages.
+  around the one leak that has been seen is a rule that misses the next one.
+- **What the walk actually costs, now that the floors are ANDed.** The first draft of this
+  entry said the cost was bounded by the backup's own footprint, "because both ends of the
+  walk are the backup's own messages". That was true of the floor rule it described and is not
+  true of the one above it: the bottom of the walk is no longer the backup's first chunk. It
+  goes on past it, to the first document that is *both* at or below the oldest id this backup
+  is known to have sent *and* older than the day its id carries, less one — so the bottom is
+  whatever traffic the chat happened to carry in that day or two. The top is the card, or the
+  newest message when there is no card. So the read is the backup's own documents, one per
+  chunk, plus a day of somebody's chat, and in a chat telstore shares with people the second
+  term is the one that decides. **Nothing bounds it but `MAX_DELETE_DOCUMENTS`**, and the
+  moment that ceiling is what stopped the walk the command stops claiming the backup is gone —
+  which is the whole reason the cost is affordable: it is paid to be able to say "Done", and
+  where it runs out the word is not said. Anyone here to make `delete` faster by dropping a
+  floor is trading that sentence away, and should read the floor bullet above before doing it.
 - **A batch does not walk for an id that neither the search nor a record knows.** `runDeletes`
   asks about every id at once and before anything is destroyed, so a walk apiece would turn one
   mistyped id in a list of five into minutes spent reading somebody's archive. It refuses as it
