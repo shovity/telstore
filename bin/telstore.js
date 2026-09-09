@@ -8,25 +8,91 @@ import { route, HELP, interruptMessage } from '../src/cli.js'
 
 const SIGINT_EXIT_CODE = 130
 
+// How long the process waits for a run to unwind itself before it stops waiting. Only a
+// rollback that cannot reach Telegram ever gets this far, and the alternative to a deadline
+// is a terminal held open by a network that is never coming back, with no way out but a
+// second Ctrl-C nobody has been told to press.
+const CLEANUP_DEADLINE_MS = 60_000
+
 // Which command is running when Ctrl-C arrives — each one tells a different truth
 // about whether progress was saved, so we need to know which to pick the right line.
 // The backup id arrives a moment later, once upload knows which backup this run is.
 let currentCommand = null
 let currentBackupId = null
 
+// Only a stream upload sets these. `streaming` is known from the command line, before the run
+// has said anything, because the wrong message is the file one that promises a resume; the
+// other two arrive once the run has something in the chat and a way to unwind it.
+let streaming = false
+let currentChat = null
+let abortRun = null
+let interrupting = false
+let deadline = null
+
 // A batch clears each finished item's record as it goes, so by the time Ctrl-C lands these
 // are transfers no second run should touch. Ctrl-C needs their names to say so.
 const finished = []
+
+// Said when the waiting ends without the rollback having finished — because someone pressed
+// Ctrl-C again, or because the deadline above ran out. Neither knows how far the removal got,
+// so both point at the command that finishes it by hand.
+function leaveNow() {
+  process.stderr.write(
+    interruptMessage(currentCommand, {
+      backupId: currentBackupId,
+      done: finished,
+      stream: true,
+      again: true,
+      chat: currentChat,
+    }),
+  )
+  process.exit(SIGINT_EXIT_CODE)
+}
 
 process.on('SIGINT', () => {
   // A passphrase prompt has stdin in raw mode, and process.exit skips readline's own cleanup.
   // Without this, Ctrl-C hands back a shell that no longer echoes what is typed into it.
   if (process.stdin.isTTY) process.stdin.setRawMode(false)
 
+  // A second Ctrl-C is someone saying they will not wait.
+  if (interrupting) {
+    leaveNow()
+    return
+  }
+
+  // Everything else keeps what it has sent on purpose — a file upload's chunks are what the
+  // next run resumes onto — so there is nothing to unwind and Ctrl-C is the immediate exit it
+  // has always been.
+  if (!abortRun) {
+    process.stderr.write(
+      interruptMessage(currentCommand, {
+        backupId: currentBackupId,
+        done: finished,
+        stream: streaming,
+      }),
+    )
+    process.exit(SIGINT_EXIT_CODE)
+  }
+
+  interrupting = true
   process.stderr.write(
-    interruptMessage(currentCommand, { backupId: currentBackupId, done: finished }),
+    interruptMessage(currentCommand, {
+      backupId: currentBackupId,
+      done: finished,
+      stream: true,
+    }),
   )
-  process.exit(SIGINT_EXIT_CODE)
+
+  // Deliberately not unref'd, and it does two jobs. It is the deadline; it is also the one
+  // handle that keeps this process alive while the rollback runs. Node leaves with 0 the
+  // moment nothing is pending, and a rollback waiting on something that holds no handle
+  // would end the process mid-removal reporting success, with the chunks still in the chat.
+  // The upload arm clears it, so a rollback that finishes normally never meets the deadline.
+  deadline = setTimeout(leaveNow, CLEANUP_DEADLINE_MS)
+
+  // The abort itself only asks; the waiting is done by main, which is still awaiting the run.
+  // Nothing it could reject with matters here — the run reports its own end.
+  Promise.resolve(abortRun()).catch(() => {})
 })
 
 async function main() {
@@ -101,6 +167,42 @@ async function main() {
     }
 
     case 'upload': {
+      // `telstore a.tar -- tar cf ./a`: one name, and the bytes are what the command writes
+      // rather than a file on disk. route has already refused every other shape of that line.
+      if (parsed.childArgv) {
+        const { runStreamUpload } = await import('../src/commands/upload-stream.js')
+
+        streaming = true
+
+        try {
+          await runStreamUpload(parsed.args[0], parsed.childArgv, parsed.options, {
+            onBackupId: (id) => {
+              currentBackupId = id
+            },
+            onAbortable: (abort, { chat } = {}) => {
+              abortRun = abort
+              currentChat = chat ?? null
+            },
+          })
+        } catch (err) {
+          // Only the run that stopped because Ctrl-C asked it to, which has already said so
+          // and already put the chat back as it found it. Everything else — a rollback that
+          // could not finish included, since that throws an error of its own — is a failure
+          // the handler below reports.
+          if (!err?.interrupted) throw err
+
+          process.stderr.write('\nStopped. Nothing this run sent was left in the chat.\n')
+          process.exitCode = SIGINT_EXIT_CODE
+        } finally {
+          // Nothing left to unwind: a Ctrl-C from here on is an ordinary immediate exit, and
+          // the deadline that was holding the process open has nothing left to wait for.
+          abortRun = null
+          if (deadline) clearTimeout(deadline)
+        }
+
+        return
+      }
+
       const { runUploads } = await import('../src/commands/upload.js')
 
       const { failed } = await runUploads(parsed.args, parsed.options, {
@@ -204,7 +306,12 @@ main().then(
   },
   (err) => {
     process.stderr.write(`Error: ${err.message}\n`)
-    process.exitCode = 1
-    exitWhenFlushed(1)
+
+    // A run the handler asked to stop leaves with 130 whatever it then had to say: a rollback
+    // that could not finish is still an interrupted run, not a command that failed on its own.
+    const code = interrupting ? SIGINT_EXIT_CODE : 1
+
+    process.exitCode = code
+    exitWhenFlushed(code)
   },
 )

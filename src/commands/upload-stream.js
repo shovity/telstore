@@ -93,6 +93,8 @@ export async function runStreamUpload(name, childArgv, options = {}, deps = {}) 
     log: writeLog = (line) => console.log(line),
     silent = false,
     onBackupId = () => {},
+    // How Ctrl-C reaches a run that must not be killed where it stands. See the call below.
+    onAbortable = () => {},
   } = deps
 
   // Before the command is started, let alone connected to Telegram: the note is the one thing
@@ -128,6 +130,38 @@ export async function runStreamUpload(name, childArgv, options = {}, deps = {}) 
   }
 
   onBackupId(id)
+
+  // The producer and the reader are named here rather than where they are made, because the
+  // abort below has to be handed out before either exists.
+  let aborted = false
+  let child = null
+  let reader = null
+
+  // A run whose chunks are removed when it fails cannot be killed where it stands: exiting at
+  // the signal would leave in the chat exactly the chunks this command promises never to
+  // leave, and removing them is a network round trip per batch. So Ctrl-C asks the run to
+  // stop instead, through this, and waits for the rollback below to finish.
+  //
+  // Handed over before connect, not after the child is spawned: from the moment the record
+  // exists there is something a Ctrl-C has to unwind, and a caller that has not been given
+  // this yet has no choice but to exit on the spot.
+  onAbortable(async () => {
+    aborted = true
+
+    // The kill stops the producer; closing the reader is what unblocks a fill still waiting
+    // on a pipe the child is never going to write to again.
+    if (child) child.kill()
+    if (reader) await reader.close()
+  }, { chat })
+
+  // The one error the caller is meant to recognise: a run that stopped because someone asked
+  // it to has nothing to report that Ctrl-C did not already say. A rollback that could not
+  // finish throws a fresh error of its own instead, and that one is still a failure.
+  function stopped() {
+    const err = new Error('Stopped before the backup was finished.')
+    err.interrupted = true
+    return err
+  }
 
   const log = silent ? () => {} : writeLog
   const warn = silent ? () => {} : writeErr
@@ -210,11 +244,16 @@ export async function runStreamUpload(name, childArgv, options = {}, deps = {}) 
   try {
     client = await connect(config, { verbose: settings.verbose })
 
+    // Connecting is the one stretch long enough for Ctrl-C to arrive before the command has
+    // been started, and starting someone's command after they asked telstore to stop is the
+    // one thing a wait must not turn into.
+    if (aborted) throw stopped()
+
     const tmp = tempDirFor(configDir)
     await fs.mkdir(tmp, { recursive: true })
 
-    const child = spawn(childArgv)
-    const reader = new ChunkReader(child.stdout)
+    child = spawn(childArgv)
+    reader = new ChunkReader(child.stdout)
 
     let size = 0
     let count = 0
@@ -234,6 +273,12 @@ export async function runStreamUpload(name, childArgv, options = {}, deps = {}) 
             // in the kernel's buffer and in the child, not in this process's memory.
             const filled = await reader.fill(handle, chunkSize)
             eof = filled.eof
+
+            // An abort that lands while this fill was waiting must not become one more chunk
+            // in the chat. The rollback below would remove it again, but not before minutes
+            // of uploading had gone by with the bar still moving, in front of the person who
+            // asked telstore to stop.
+            if (aborted) throw stopped()
 
             if (filled.bytes > 0) {
               // Asked of bytes that actually arrived, not of the count alone. A stream that
@@ -386,9 +431,14 @@ export async function runStreamUpload(name, childArgv, options = {}, deps = {}) 
       }
     }
   } catch (err) {
-    // Always throws: err itself once the chat is clean again, or a report of the rollback
-    // that could not finish.
-    await rollback(err)
+    // Whatever an abort surfaced as — a fill rejecting on a destroyed pipe, a producer that
+    // died on the signal, a stall that never came back — the reason this run stopped is the
+    // Ctrl-C, and saying so is what lets the caller leave with 130 instead of reporting a
+    // failure nobody had.
+    //
+    // Always throws: the error itself once the chat is clean again, or a report of the
+    // rollback that could not finish.
+    await rollback(aborted ? stopped() : err)
   } finally {
     // connect is inside the try now, because a rollback needs a live client and the finally
     // that closes one has to run after it. So a connect that failed leaves nothing to close,

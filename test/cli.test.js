@@ -208,6 +208,48 @@ test('a batch that has finished nothing yet reads exactly like a single upload',
   assert.equal(batch, one)
 })
 
+// A backup made from a command cannot be resumed — the bytes have gone past and the next run
+// cuts them differently — so the chunks already in the chat are chunks nothing will ever
+// point at again. The file wording promises exactly the resume this one cannot have.
+test('Ctrl-C during a stream upload does not promise a resume that cannot happen', () => {
+  const message = interruptMessage('upload', { backupId: 'telstore-1', stream: true })
+
+  assert.match(message, /cannot be resumed/)
+  assert.match(message, /removing/i)
+  assert.doesNotMatch(message, /run the same command again/i)
+})
+
+test('a second Ctrl-C leaves the id and the way to clean up by hand', () => {
+  const message = interruptMessage('upload', {
+    backupId: 'telstore-1',
+    stream: true,
+    again: true,
+    chat: '@my backups',
+  })
+
+  // The chat is named for the same reason the rollback's own recovery line names it: a later
+  // `delete` resolves its own destination from config, and firing these ids at the wrong peer
+  // destroys whatever happens to carry them there.
+  assert.match(message, /npx telstore delete telstore-1 --chat '@my backups'/)
+})
+
+test('a stream upload interrupted before anything was sent promises nothing false', () => {
+  const message = interruptMessage('upload', { stream: true })
+
+  assert.match(message, /Stopped before anything was sent/)
+  assert.doesNotMatch(message, /undefined/)
+  assert.doesNotMatch(message, /removing/i)
+})
+
+// The stream branch is reached by a flag the file call sites never pass, and a file upload's
+// chunks are kept on purpose for the next run to resume onto.
+test('a file upload keeps its own wording when the stream branch exists', () => {
+  const message = interruptMessage('upload', { backupId: 'telstore-1' })
+
+  assert.match(message, /run the same command again/)
+  assert.doesNotMatch(message, /cannot be resumed/)
+})
+
 test('interrupting a restore before a .partial exists promises no file to resume', () => {
   const message = interruptMessage('restore')
 

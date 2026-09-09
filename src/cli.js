@@ -1,6 +1,8 @@
 import { basename } from 'node:path'
 import { parseArgs } from 'node:util'
 
+import { shellArg } from './shell.js'
+
 const SUBCOMMANDS = new Set([
   'login',
   'logout',
@@ -115,7 +117,42 @@ Options apply to one run and are never saved. Use config to change a setting for
 // finished chunk to a state file, restore has not. Naming the backup matters because the
 // id is what `status` lists and what a later `restore` needs — the chunks are already in
 // the chat under that id, whether or not this run ever finishes.
-export function interruptMessage(command, { backupId, done = [] } = {}) {
+export function interruptMessage(
+  command,
+  { backupId, done = [], stream = false, again = false, chat = null } = {},
+) {
+  // A backup made from a command is the one upload Ctrl-C cannot leave where it is. The bytes
+  // have gone past and the next run cuts them differently, so a chunk already in the chat is
+  // a chunk no manifest will ever name — which is why this run is asked to remove them and
+  // the process waits, rather than promising the resume the file wording promises.
+  if (command === 'upload' && stream) {
+    // Nothing is in the chat until there is an id to put it under, and a run stopped before
+    // that has nothing for anyone to clean up.
+    if (!backupId) {
+      return '\nStopped before anything was sent.\n'
+    }
+
+    if (again) {
+      // "may still" because this is said while the removal is halfway through and nobody
+      // knows how far it got. The chat is named for the same reason the rollback's own
+      // recovery line names it: a later `delete` resolves its destination from config, and
+      // these ids fired at the wrong peer destroy whatever happens to carry them there.
+      const where = chat === null ? '' : ` --chat ${shellArg(chat)}`
+      const removal = `npx telstore delete ${shellArg(backupId)}${where}`
+
+      return (
+        `\nLeaving now. Backup ${backupId} may still have chunks in the chat with no manifest ` +
+        `pointing at them — run "${removal}" to remove them.\n`
+      )
+    }
+
+    return (
+      `\nStopping. Backup ${backupId} was made from a command and cannot be resumed, so ` +
+      'telstore is removing the chunks it already sent. This takes a moment — press Ctrl-C ' +
+      'again to leave now and clean up by hand.\n'
+    )
+  }
+
   if (command === 'upload') {
     const backup = backupId ? `Backup ${backupId} is saved` : 'Progress is saved'
 

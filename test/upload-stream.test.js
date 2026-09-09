@@ -906,3 +906,104 @@ test('the header names the backup, the command and where it is going', async () 
   assert.match(text, /@store/)
   assert.match(text, new RegExp(`npx telstore restore ${result.id}`))
 })
+
+// --- what Ctrl-C reaches ---
+
+// The binary cannot kill a stream upload where it stands: the chunks already in the chat are
+// the ones this command promises never to leave, and removing them takes a network round trip
+// per batch. This is the seam it asks through instead.
+test('the abort a stream upload hands out stops it and takes its chunks with it', async () => {
+  const ws = await workspace()
+  const client = fakeClient()
+  let abort = null
+  let seenChat = null
+  let interrupted = null
+  let sends = 0
+
+  // Not awaited, and it must not be: `abort` closes the iterator this generator is currently
+  // running inside, so waiting for it here would be the run waiting on itself. Setting the
+  // flag is synchronous, which is the whole of what the next fill has to see.
+  const spawn = fakeSpawn([TEN, TEN, TEN], {
+    between: (index) => {
+      if (index === 1) abort()
+    },
+  })
+
+  await assert.rejects(
+    () =>
+      runStreamUpload(
+        'a.tar',
+        ['tar', 'cf', './a'],
+        { 'chunk-size': '10' },
+        streamDeps(client, ws, {
+          spawn,
+          sendChunk: async (...args) => {
+            sends += 1
+            return await uploadDeps(client).sendChunk(...args)
+          },
+          onAbortable: (fn, info) => {
+            abort = fn
+            seenChat = info?.chat ?? null
+          },
+        }),
+      ),
+    (err) => {
+      interrupted = err.interrupted
+      return true
+    },
+  )
+
+  // The flag is the whole contract with the binary: without it a Ctrl-C reads as a command
+  // that failed, and the process reports an error nobody had.
+  assert.equal(interrupted, true)
+
+  // The bytes of the chunk that was mid-read when the abort landed are already on disk, and
+  // sending them anyway would spend minutes uploading something the rollback then removes —
+  // with the person who asked telstore to stop watching a bar that keeps moving.
+  assert.equal(sends, 1)
+
+  // Nothing of this run is left: not the chunk that was already in the chat, not the producer,
+  // and not the record that was the only list of either.
+  assert.deepEqual(client.messages, [])
+  // includes rather than deepEqual: the abort kills the producer, and the run's own exit path
+  // kills it again on the way out. A second signal at a process that has already gone is a
+  // no-op, and pinning the count would pin an accident of ordering rather than the promise.
+  assert.ok(spawn.killed.includes('SIGTERM'))
+  assert.deepEqual(await findStates('telstore-', ws.configDir), [])
+
+  // The chat comes with the abort because the caller has no other way to know it, and the
+  // command it prints when someone will not wait for the rollback has to name it.
+  assert.equal(seenChat, '@store')
+})
+
+// A Ctrl-C that lands while telstore is still connecting must not become someone's command
+// running anyway — it may be an hour of pg_dump, and the answer to it was already no.
+test('an abort before the producer starts never starts it', async () => {
+  const ws = await workspace()
+  const client = fakeClient()
+  const spawn = fakeSpawn([TEN])
+  let abort = null
+
+  await assert.rejects(
+    () =>
+      runStreamUpload(
+        'a.tar',
+        ['tar', 'cf', './a'],
+        { 'chunk-size': '10' },
+        streamDeps(client, ws, {
+          spawn,
+          onAbortable: (fn) => {
+            abort = fn
+          },
+          connect: async () => {
+            await abort()
+            return client
+          },
+        }),
+      ),
+    (err) => err.interrupted === true,
+  )
+
+  assert.deepEqual(spawn.calls, [])
+  assert.deepEqual(client.messages, [])
+})

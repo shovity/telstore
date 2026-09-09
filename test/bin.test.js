@@ -6,7 +6,7 @@ import path from 'node:path'
 import { promises as fs } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
-import { tempDir } from './helpers.js'
+import { LOGGED_IN, tempDir } from './helpers.js'
 
 const run = promisify(execFile)
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'telstore.js')
@@ -395,3 +395,233 @@ test('an unquoted note is named as the reason a file is missing', async () => {
   assert.match(stderr, /File does not exist/)
   assert.match(stderr, /--note "ghi"/)
 })
+
+// --- Ctrl-C during a stream upload ---
+
+// A stream upload has to reach Telegram before any of this matters, and the suite never does.
+// So the binary runs out of a copy of itself with exactly one file replaced. `connect` is the
+// single door a session goes through (docs/design/module-boundaries.md), which makes it the
+// one seam a test can stand in without faking the run around it: the real bin/telstore.js,
+// the real src/cli.js and the real upload-stream.js are what execute here, so the signal, the
+// exit code and every line asserted below are theirs.
+const REPO = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
+
+const FAKE_CLIENT = (realClient) => `
+// Written by test/bin.test.js. Everything the real client does is re-exported; only the two
+// calls that would open a socket are replaced, and each says so on stderr so the test can wait
+// on what the run has actually done rather than on a sleep of its own.
+export * from ${JSON.stringify(realClient)}
+
+let nextId = 1000
+
+export async function connect() {
+  return {
+    async invoke() {
+      return true
+    },
+    async sendFile() {
+      // Slow on purpose: a signal has to be able to land between two chunks.
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      nextId += 1
+      process.stderr.write('\\nSENT ' + nextId + '\\n')
+      return { id: nextId }
+    },
+    async destroy() {},
+  }
+}
+
+export async function deleteMessages(client, peer, ids) {
+  process.stderr.write('\\nDELETING ' + ids.length + '\\n')
+  // A rollback that cannot reach Telegram is what a second Ctrl-C has to be able to walk
+  // out of, and a hang is the only honest stand-in for one.
+  if (process.env.TELSTORE_TEST_HANG_DELETE === '1') await new Promise(() => {})
+  await new Promise((resolve) => setTimeout(resolve, 200))
+  process.stderr.write('\\nDELETED ' + ids.length + '\\n')
+}
+`
+
+async function fakeTelegram() {
+  const root = await tempDir('stream-sigint')
+  const tree = path.join(root, 'tree')
+
+  await fs.mkdir(tree, { recursive: true })
+
+  // package.json comes too, or node reads the copied .js files as CommonJS.
+  for (const entry of ['bin', 'src', 'package.json']) {
+    await fs.cp(path.join(REPO, entry), path.join(tree, entry), { recursive: true })
+  }
+
+  // Symlinked rather than copied: teleproto is 50MB, and the fake below re-exports the real
+  // client for everything it does not replace.
+  await fs.symlink(path.join(REPO, 'node_modules'), path.join(tree, 'node_modules'))
+  await fs.writeFile(
+    path.join(tree, 'src', 'client.js'),
+    FAKE_CLIENT(path.join(REPO, 'src', 'client.js')),
+  )
+
+  const home = path.join(root, 'home')
+  await fs.mkdir(path.join(home, '.telstore'), { recursive: true })
+  await fs.writeFile(
+    path.join(home, '.telstore', 'config.json'),
+    JSON.stringify({ ...LOGGED_IN, settings: { chat: 'me' } }),
+  )
+
+  return { bin: path.join(tree, 'bin', 'telstore.js'), home }
+}
+
+// Every wait below is for something the run itself printed, so nothing here is timed against
+// a sleep: the test acts the moment the binary says it has sent a chunk or started removing
+// one, whatever the machine's speed.
+function drive(bin, args, { home, env = {} } = {}) {
+  const child = spawn(process.execPath, [bin, ...args], {
+    env: { ...process.env, HOME: home, ...env },
+  })
+
+  const out = { stdout: '', stderr: '' }
+  const waiting = []
+
+  const arrived = () => {
+    const text = out.stdout + out.stderr
+    for (const waiter of [...waiting]) {
+      if (!waiter.pattern.test(text)) continue
+      waiting.splice(waiting.indexOf(waiter), 1)
+      waiter.done()
+    }
+  }
+
+  child.stdout.on('data', (chunk) => {
+    out.stdout += chunk.toString()
+    arrived()
+  })
+
+  child.stderr.on('data', (chunk) => {
+    out.stderr += chunk.toString()
+    arrived()
+  })
+
+  const exited = new Promise((resolve) => child.on('exit', (code) => resolve(code)))
+
+  return {
+    out,
+    exited,
+    interrupt: () => child.kill('SIGINT'),
+    until(pattern, ms = 15_000) {
+      return new Promise((resolve, reject) => {
+        if (pattern.test(out.stdout + out.stderr)) return resolve()
+
+        const timer = setTimeout(() => {
+          child.kill('SIGKILL')
+          reject(new Error(`never printed ${pattern}. stderr: ${out.stderr}`))
+        }, ms)
+
+        waiting.push({
+          pattern,
+          done: () => {
+            clearTimeout(timer)
+            resolve()
+          },
+        })
+      })
+    },
+  }
+}
+
+// 250000 bytes against 100KB chunks is two whole chunks and a remainder the producer never
+// finishes, so the signal always lands with exactly two chunks in the chat and a third being
+// filled — something to remove, and a run that is still going.
+const PRODUCER = ['--chunk-size', '100KB', '--', 'sh', '-c', 'head -c 250000 /dev/zero; sleep 5']
+
+// The command telstore is asked to run may be an hour of pg_dump, or something that costs
+// real money to start. Nothing about the machine's own state is a reason to start it.
+test('a stream upload with no login fails before it runs the command', async () => {
+  const home = await tempDir('stream-no-login')
+  const ran = path.join(home, 'ran')
+
+  // The marker is a file rather than a word on stdout, because the header telstore prints
+  // echoes the command line back and would match whatever the command was going to say.
+  const { code, stderr } = await runCliIn(home, [
+    'bak',
+    '--chat',
+    'me',
+    '--',
+    'sh',
+    '-c',
+    `: > ${ran}`,
+  ])
+
+  assert.equal(code, 1)
+  assert.match(stderr, /Not logged in/)
+  await assert.rejects(fs.stat(ran), { code: 'ENOENT' })
+})
+
+// The property the cooperative handler exists for: process.exit at the signal would leave in
+// the chat exactly the chunks a stream backup can never point at again.
+test(
+  'Ctrl-C during a stream upload removes what it sent before the process leaves',
+  { timeout: 60_000 },
+  async () => {
+    const { bin, home } = await fakeTelegram()
+    const run = drive(bin, ['bak', ...PRODUCER], { home })
+
+    await run.until(/SENT \d+[\s\S]*SENT \d+/)
+    run.interrupt()
+
+    const code = await run.exited
+
+    assert.match(run.out.stderr, /cannot be resumed/)
+    assert.match(run.out.stderr, /DELETED 2/)
+    assert.match(run.out.stderr, /Nothing this run sent was left in the chat/)
+
+    // A run that stopped because it was asked to is not a command that failed, and the line
+    // that would say so belongs to the failures.
+    assert.doesNotMatch(run.out.stderr, /^Error:/m)
+    assert.equal(code, 130)
+  },
+)
+
+test(
+  'a second Ctrl-C leaves at once and names what may still be in the chat',
+  { timeout: 30_000 },
+  async () => {
+    const { bin, home } = await fakeTelegram()
+    const run = drive(bin, ['bak', ...PRODUCER], {
+      home,
+      env: { TELSTORE_TEST_HANG_DELETE: '1' },
+    })
+
+    await run.until(/SENT \d+[\s\S]*SENT \d+/)
+    run.interrupt()
+    await run.until(/DELETING 2/)
+    run.interrupt()
+
+    const code = await run.exited
+    const [, id] = run.out.stdout.match(/Backup (telstore-\S+)/)
+
+    assert.equal(code, 130)
+    assert.match(run.out.stderr, new RegExp(`npx telstore delete ${id} --chat me`))
+    assert.doesNotMatch(run.out.stderr, /DELETED/)
+  },
+)
+
+// A file upload's chunks are kept on purpose — the next run resumes onto them — so its Ctrl-C
+// is still the immediate exit it always was, with no rollback anywhere near it.
+test(
+  'Ctrl-C during a file upload still keeps its chunks and leaves at once',
+  { timeout: 60_000 },
+  async () => {
+    const { bin, home } = await fakeTelegram()
+    const file = path.join(home, 'big.tar')
+    await fs.writeFile(file, Buffer.alloc(600_000, 7))
+
+    const run = drive(bin, [file, '--chunk-size', '100KB'], { home })
+
+    await run.until(/SENT \d+[\s\S]*SENT \d+/)
+    run.interrupt()
+
+    const code = await run.exited
+
+    assert.equal(code, 130)
+    assert.match(run.out.stderr, /run the same command again to continue/)
+    assert.doesNotMatch(run.out.stderr, /DELETING/)
+  },
+)
