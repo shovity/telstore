@@ -4,11 +4,11 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { Readable } from 'node:stream'
 
-import { runStreamUpload, tempDirFor } from '../src/commands/upload-stream.js'
+import { runStreamUpload } from '../src/commands/upload-stream.js'
 import { parseManifestCaption } from '../src/caption.js'
 import { saveConfig } from '../src/config.js'
 import { parseManifest } from '../src/manifest.js'
-import { MAX_STATES, findStates } from '../src/state.js'
+import { MAX_STATES, findStates, tempDirFor } from '../src/state.js'
 
 import { LOGGED_IN, collect, fakeClient, tempDir, uploadDeps } from './helpers.js'
 
@@ -430,9 +430,50 @@ test('only the chunk being filled has a temporary file', async () => {
   assert.deepEqual(await fs.readdir(ws.tmp), [])
 })
 
+// bin/telstore.js keeps this path so that the one ending which never comes back through
+// `discard` — a second Ctrl-C, which exits where it stands — can still take the file with it.
+// What the caller holds therefore has to be what is on disk at that moment, so this checks it
+// against the directory rather than against a list of calls.
+test('the chunk being buffered is named to the caller while it is on disk', async () => {
+  const ws = await workspace()
+  const client = fakeClient()
+  const seen = []
+  let held = null
+
+  const between = async (index) => {
+    seen.push({
+      index,
+      held: held === null ? null : path.basename(held),
+      files: await fs.readdir(ws.tmp),
+    })
+  }
+
+  const result = await runStreamUpload(
+    'a.tar',
+    ['tar', 'cf', './a'],
+    { 'chunk-size': '10' },
+    streamDeps(client, ws, {
+      spawn: fakeSpawn([TEN, TEN, FIVE], { between }),
+      onTempChunk: (file) => {
+        held = file
+      },
+    }),
+  )
+
+  assert.deepEqual(seen, [
+    { index: 1, held: `${result.id}-1.chunk`, files: [`${result.id}-1.chunk`] },
+    { index: 2, held: `${result.id}-2.chunk`, files: [`${result.id}-2.chunk`] },
+  ])
+
+  // Nothing borrowed at the end, so a Ctrl-C landing after the run has settled has nothing to
+  // remove and nothing to say about a file that is not there.
+  assert.equal(held, null)
+})
+
 test('a run that fails leaves no temporary chunk file behind', async () => {
   const ws = await workspace()
   const client = fakeClient({ failOnChunk: 1 })
+  let held = null
 
   await assert.rejects(
     () =>
@@ -440,12 +481,21 @@ test('a run that fails leaves no temporary chunk file behind', async () => {
         'a.tar',
         ['tar', 'cf', './a'],
         { 'chunk-size': '10' },
-        streamDeps(client, ws, { spawn: fakeSpawn([TEN, TEN, FIVE]) }),
+        streamDeps(client, ws, {
+          spawn: fakeSpawn([TEN, TEN, FIVE]),
+          onTempChunk: (file) => {
+            held = file
+          },
+        }),
       ),
     /connection dropped mid-transfer/,
   )
 
   assert.deepEqual(await fs.readdir(ws.tmp), [])
+
+  // And the caller is told so. A failure unwinds through the same `finally` a clean run does,
+  // so the process is not left believing it still has a file to unlink on the way out.
+  assert.equal(held, null)
 })
 
 // A leaked temporary chunk file holds up to a whole chunk — 1.8GB by default — and telstore

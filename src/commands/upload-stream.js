@@ -29,17 +29,11 @@ import {
   pruneStates,
   saveState,
   streamKey,
+  tempDirFor,
 } from '../state.js'
 import { ChunkReader } from '../stream.js'
 import { uploadRange } from '../uploader.js'
 import { createOnRetry, realSendChunk, realSendManifest } from './upload.js'
-
-// One chunk of borrowed disk at a time, under ~/.telstore rather than os.tmpdir(): /tmp is
-// tmpfs on many Linux distributions, and "borrow one chunk of disk" would silently mean
-// "borrow 1800MB of RAM" — a memory limit dressed up as a chunk size.
-export function tempDirFor(configDir) {
-  return path.join(configDir, 'tmp')
-}
 
 // The borrowing ends whether the chunk went out or the run fell over on it. close() failing
 // must not be what stops the unlink — the file would sit there holding a whole chunk that
@@ -95,6 +89,10 @@ export async function runStreamUpload(name, childArgv, options = {}, deps = {}) 
     onBackupId = () => {},
     // How Ctrl-C reaches a run that must not be killed where it stands. See the call below.
     onAbortable = () => {},
+    // Which chunk file this run is holding, so the one ending that does not come back through
+    // `discard` can still take it with it. Said before the file is opened and unsaid after it
+    // is removed, so the caller's copy is never narrower than what is actually on disk.
+    onTempChunk = () => {},
   } = deps
 
   // Before the command is started, let alone connected to Telegram: the note is the one thing
@@ -264,6 +262,12 @@ export async function runStreamUpload(name, childArgv, options = {}, deps = {}) 
       try {
         for (;;) {
           const file = path.join(tmp, `${id}-${count}.chunk`)
+
+          // Before the open, not after it: 'w+' creates the file, so an open that fails
+          // having created it would otherwise leave a name nobody outside this loop knows.
+          // Unlinking a file that was never made is an ENOENT the caller ignores.
+          onTempChunk(file)
+
           const handle = await fs.open(file, 'w+')
           let eof = false
 
@@ -348,6 +352,11 @@ export async function runStreamUpload(name, childArgv, options = {}, deps = {}) 
             }
           } finally {
             await discard(handle, file, { writeErr, chunkSize })
+
+            // Unsaid whether the removal worked or not. If it did there is nothing left to
+            // remove; if it did not, `discard` has already named the file on stderr, and a
+            // second attempt from the signal handler would say it twice.
+            onTempChunk(null)
           }
 
           if (eof) break

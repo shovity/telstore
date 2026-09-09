@@ -13,6 +13,7 @@ import {
   stateFile,
   stateKey,
   streamKey,
+  tempDirFor,
 } from '../src/state.js'
 
 import { LOGGED_IN, collect, tempDir } from './helpers.js'
@@ -781,4 +782,85 @@ test('a restore record with a damaged size does not take the report down', async
 
   assert.match(out.text(), /Sho \(@shovity\)/)
   assert.match(out.text(), /1 restore/)
+})
+
+
+async function saveTempChunk(configDir, name, bytes) {
+  const tmp = tempDirFor(configDir)
+
+  await fs.mkdir(tmp, { recursive: true })
+  await fs.writeFile(path.join(tmp, name), Buffer.alloc(bytes))
+
+  return path.join(tmp, name)
+}
+
+// Measured in the e2e channel on 2026-09-09 and this is the exact shape of it: three runs
+// stopped with a second Ctrl-C, the printed `delete` run for each, and then a machine holding
+// 37MB of buffered chunks under a report that said "Unfinished none" and stopped there. The
+// records are gone by then, so this is the only thing left that can mention those files.
+test('buffered chunks are named even when nothing is unfinished', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+  const file = await saveTempChunk(configDir, 'telstore-20260909-94ebc5-2.chunk', 2048)
+
+  const text = await report(configDir)
+
+  assert.match(text, /Unfinished\s+none/)
+  assert.match(text, /telstore-20260909-94ebc5-2\.chunk/)
+  assert.match(text, /1 chunk file, 2\.0 KB in all/)
+  assert.match(text, new RegExp(`rm ${file}`))
+})
+
+// The early return that ended the report when nothing was unfinished is what hid these files
+// for a whole branch, so the case with records in it is worth its own test: a report that
+// mentions them only on an empty machine is a report that mentions them almost never.
+test('buffered chunks are named alongside the records too', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+  await saveStream(configDir)
+  await saveTempChunk(configDir, 'telstore-1-3.chunk', 1024)
+
+  const text = await report(configDir)
+
+  assert.match(text, /telstore-1-3\.chunk/)
+  assert.match(text, /npx telstore delete telstore-1/)
+})
+
+// A machine that has never run a backup from a command has no such directory, and inventing a
+// heading for it would turn "nothing is wrong" into something to read about.
+test('a machine with no buffered chunks says nothing about them', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+
+  assert.doesNotMatch(await report(configDir), /chunk file/)
+})
+
+// The total is what someone decides by, so a file that could not be measured must not be
+// quietly counted as nothing.
+test('a total that leaves a file out says it is a floor', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+  await saveTempChunk(configDir, 'telstore-1-0.chunk', 1024)
+  const tmp = tempDirFor(configDir)
+  await fs.symlink(path.join(tmp, 'nowhere'), path.join(tmp, 'telstore-1-1.chunk'))
+
+  const text = await report(configDir)
+
+  assert.match(text, /at least 1\.0 KB in all/)
+  assert.match(text, /telstore-1-1\.chunk\s+size unknown/)
+})
+
+// And status says so in one line with the rest of the report still around it, the same way a
+// settings row that will not parse is loud in its own row rather than fatal. Reporting it as
+// nothing would be status promising a clean machine it never looked at.
+test('a tmp directory that cannot be read is named, and does not stop the report', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+  await fs.writeFile(tempDirFor(configDir), 'not a directory')
+
+  const text = await report(configDir)
+
+  assert.match(text, /Sho \(@shovity\)/)
+  assert.match(text, new RegExp(`${tempDirFor(configDir)} could not be read`))
+  assert.match(text, /holding up to a whole chunk/)
 })

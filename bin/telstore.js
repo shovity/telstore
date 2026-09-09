@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { unlinkSync } from 'node:fs'
+
 import { route, HELP, interruptMessage } from '../src/cli.js'
 
 // Each command is imported where it runs, not here. Importing all nine up front pulled
@@ -36,6 +38,41 @@ let settled = false
 // This process is already on its way out, and has already said why.
 let leaving = false
 
+// The chunk file a stream upload is buffering into right now, or null. The run removes its
+// own on every ending it gets to run code for; this exists for the one ending it does not.
+let tempChunk = null
+
+// What a Ctrl-C that will not wait can still do about that file, and it has to be exactly
+// this shape. `unlinkSync` is one local syscall — microseconds, no socket, nothing that can
+// hang — where anything awaited here would be waiting on the very run this exit exists to
+// stop waiting for. Removing a file that is still being written into is not a problem where
+// it matters: on POSIX the name goes now and the space comes back when this process dies,
+// which is immediately. A platform that refuses to unlink an open file leaves the user with
+// a file holding up to a whole chunk, so that ending — and only that ending — prints.
+//
+// Silence on success is the point rather than an omission: the rule is that nothing telstore
+// leaves behind goes unnamed, and this leaves nothing behind.
+function dropTempChunk() {
+  const file = tempChunk
+
+  if (file === null) return ''
+
+  tempChunk = null
+
+  try {
+    unlinkSync(file)
+    return ''
+  } catch (err) {
+    // Already gone — the run's own discard won the race — is not something to report.
+    if (err.code === 'ENOENT') return ''
+
+    return (
+      `\nThe chunk telstore was buffering is still on this machine: ${file} ` +
+      `(${err.message}). It holds up to one chunk — remove it by hand.\n`
+    )
+  }
+}
+
 // A batch clears each finished item's record as it goes, so by the time Ctrl-C lands these
 // are transfers no second run should touch. Ctrl-C needs their names to say so.
 const finished = []
@@ -50,7 +87,12 @@ function leave(message) {
   if (leaving) process.exit(SIGINT_EXIT_CODE)
 
   leaving = true
-  process.stderr.write(message)
+
+  // Every exit the handler leads to comes through here, which is why the borrowed disk is
+  // given back here rather than in the second-Ctrl-C arm alone: the deadline running out
+  // ends the process in exactly the same place, and so does a Ctrl-C on a run that had
+  // nothing to unwind. One write, so the two lines cannot be split by a slow pipe.
+  process.stderr.write(message + dropTempChunk())
   exitWhenFlushed(SIGINT_EXIT_CODE)
 }
 
@@ -211,6 +253,9 @@ async function main() {
             onAbortable: (abort, { chat } = {}) => {
               abortRun = abort
               currentChat = chat ?? null
+            },
+            onTempChunk: (file) => {
+              tempChunk = file
             },
           })
         } catch (err) {

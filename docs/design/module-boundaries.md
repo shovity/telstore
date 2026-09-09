@@ -46,7 +46,10 @@
   1800MB of RAM — a memory limit wearing a chunk size's clothes, discovered by whoever first ran
   the default `--chunk-size` on a machine with 2GB. Being under `~/.telstore` also means `down`
   already removes them and names the directory as telstore's own rather than reporting it as a
-  foreign entry someone should look at.
+  foreign entry someone should look at. `tempDirFor` and `listTempChunks` therefore sit in
+  `state.js` beside `stateDir`, not in the upload command: they answer the same question — what
+  has this machine got of telstore's on it — and `status` has to be able to ask it without
+  importing `upload-stream.js`, which would drag a second upload loop and teleproto behind it.
 - `bin/telstore.js` imports each command inside its own `switch` arm. Nine static imports made
   every run pay for teleproto (~0.4s, 50MB) including `--help`, `config`, `logout` and `token`;
   those now start in 0.06s. `src/cli.js` stays static because every run parses arguments.

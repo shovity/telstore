@@ -8,6 +8,69 @@ export function stateDir(configDir = defaultConfigDir()) {
   return path.join(configDir, 'state')
 }
 
+// The other thing telstore keeps on this machine, and the only one that is not a record: a
+// stream upload borrows one chunk of disk at a time here while it sends it. Under
+// ~/.telstore rather than os.tmpdir() because /tmp is tmpfs on many Linux distributions, and
+// "borrow one chunk of disk" would silently mean "borrow 1800MB of RAM" — a memory limit
+// dressed up as a chunk size.
+//
+// It lives beside stateDir because it answers the same question — what has this machine got
+// of telstore's on it — and because `status` has to be able to ask without importing the
+// upload command, which would drag a second upload loop and teleproto in with it.
+export function tempDirFor(configDir = defaultConfigDir()) {
+  return path.join(configDir, 'tmp')
+}
+
+// What is in there now. A run removes its own chunk file on every ending it gets to run code
+// for, so a file here is either a run happening at this moment or a run that was stopped
+// where it stood — a SIGKILL, a crash, a machine losing power. Nothing here removes them:
+// from outside the run that owns one, those two cases look exactly the same, and deleting
+// the chunk a live upload is filling is the confident wrong thing this project refuses
+// everywhere else. Naming them is the whole job.
+//
+// A stat that fails yields an unknown size rather than a dropped row, the same care
+// listStates takes with mtimes: the file really can vanish between the readdir and the stat —
+// that is what a run finishing normally does — and status is the command someone runs
+// *because* something is wrong.
+export async function listTempChunks(configDir = defaultConfigDir()) {
+  const dir = tempDirFor(configDir)
+  let names
+
+  try {
+    names = await fs.readdir(dir)
+  } catch (err) {
+    // A machine that has never made a backup from a command has no such directory, and that
+    // is not a fault to report. Anything else is: a directory telstore cannot read may be
+    // holding a whole chunk, and answering "nothing there" would be the silent wrong answer
+    // this listing exists to prevent. The caller decides what to do with it.
+    if (err.code === 'ENOENT') return []
+
+    throw err
+  }
+
+  const found = []
+
+  for (const name of names.sort()) {
+    const file = path.join(dir, name)
+    let size = null
+
+    try {
+      const stat = await fs.stat(file)
+
+      if (!stat.isFile()) continue
+
+      size = stat.size
+    } catch {
+      // Gone or unreadable between the readdir and here. Still a name worth printing: the
+      // point of the listing is that nothing telstore left behind goes unmentioned.
+    }
+
+    found.push({ name, file, size })
+  }
+
+  return found
+}
+
 export function stateKey(absPath, size, mtimeMs) {
   return createHash('sha1').update(`${absPath}:${size}:${mtimeMs}`).digest('hex')
 }

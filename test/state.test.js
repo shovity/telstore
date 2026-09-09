@@ -25,6 +25,8 @@ import {
   listRestores,
   pruneRestores,
   MAX_RESTORES,
+  listTempChunks,
+  tempDirFor,
 } from '../src/state.js'
 
 import { tempDir } from './helpers.js'
@@ -525,4 +527,76 @@ test('findRestores ignores upload records with the same id', async () => {
   await saveState(stateKey('/home/ai/data.tar', 1, 1), sampleState({ id: 'telstore-a' }), configDir)
 
   assert.deepEqual(await findRestores('telstore-a', configDir), [])
+})
+
+
+// What `status` reports so that a chunk left by a run that died goes named rather than
+// sitting there being 1.8GB of nothing anybody mentions.
+test('listTempChunks names each buffered chunk and what it holds', async () => {
+  const configDir = await tempDir('temp-chunks')
+  const tmp = tempDirFor(configDir)
+
+  await fs.mkdir(tmp, { recursive: true })
+  await fs.writeFile(path.join(tmp, 'telstore-20260909-b-1.chunk'), Buffer.alloc(30))
+  await fs.writeFile(path.join(tmp, 'telstore-20260909-a-0.chunk'), Buffer.alloc(10))
+
+  const found = await listTempChunks(configDir)
+
+  // Sorted, so two runs of status over an unchanged directory do not print the same files in
+  // a different order and read as something having happened.
+  assert.deepEqual(
+    found.map(({ name, size }) => ({ name, size })),
+    [
+      { name: 'telstore-20260909-a-0.chunk', size: 10 },
+      { name: 'telstore-20260909-b-1.chunk', size: 30 },
+    ],
+  )
+  assert.equal(found[0].file, path.join(tmp, 'telstore-20260909-a-0.chunk'))
+})
+
+// A machine that never ran a stream upload has no such directory, and status must not report
+// that as anything at all.
+test('listTempChunks says nothing about a directory that is not there', async () => {
+  const configDir = await tempDir('temp-chunks')
+
+  assert.deepEqual(await listTempChunks(configDir), [])
+})
+
+// The point of the listing is that nothing telstore left behind goes unnamed, so a file whose
+// size cannot be read is still a file worth printing — the alternative is a row that vanishes
+// exactly when something is wrong with it.
+test('a chunk file that cannot be stat-ed is still named, with its size unknown', async () => {
+  const configDir = await tempDir('temp-chunks')
+  const tmp = tempDirFor(configDir)
+
+  await fs.mkdir(tmp, { recursive: true })
+  await fs.symlink(path.join(tmp, 'nowhere'), path.join(tmp, 'telstore-broken-0.chunk'))
+
+  assert.deepEqual(
+    (await listTempChunks(configDir)).map(({ name, size }) => ({ name, size })),
+    [{ name: 'telstore-broken-0.chunk', size: null }],
+  )
+})
+
+// tmp is telstore's own working directory, so a directory inside it is not a chunk anybody
+// borrowed and printing it as one would send somebody chasing a file that is not there.
+test('a directory under tmp is not reported as a buffered chunk', async () => {
+  const configDir = await tempDir('temp-chunks')
+  const tmp = tempDirFor(configDir)
+
+  await fs.mkdir(path.join(tmp, 'a-directory'), { recursive: true })
+
+  assert.deepEqual(await listTempChunks(configDir), [])
+})
+
+// "Nothing there" is the one answer this must not give when it does not know: a directory it
+// cannot open may be holding a whole chunk. ENOENT is the only silent case, because a machine
+// that never made a backup from a command genuinely has nothing.
+test('a tmp that cannot be read is an error rather than an empty listing', async () => {
+  const configDir = await tempDir('temp-chunks')
+
+  await fs.mkdir(configDir, { recursive: true })
+  await fs.writeFile(tempDirFor(configDir), 'not a directory')
+
+  await assert.rejects(() => listTempChunks(configDir), { code: 'ENOTDIR' })
 })

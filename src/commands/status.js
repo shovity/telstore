@@ -8,7 +8,7 @@ import { formatBytes, plural } from '../progress.js'
 import { assertLoggedIn } from '../session.js'
 import { resolveSettings } from '../settings.js'
 import { shellArg } from '../shell.js'
-import { canResume, listRestores, listStates } from '../state.js'
+import { canResume, listRestores, listStates, listTempChunks, tempDirFor } from '../state.js'
 
 const LABEL_WIDTH = 'Destination'.length + 2
 
@@ -144,6 +144,64 @@ async function restoreResumeLine(record, destination) {
   return field('Resume', restoreCommand(record, destination))
 }
 
+// The one thing under ~/.telstore that is not a record. A stream upload buffers a chunk into
+// ~/.telstore/tmp while it sends it and removes it as it goes, so a file there is either a run
+// happening at this moment or a run that was stopped where it stood — a SIGKILL, a crash, a
+// machine losing power, and until this branch a second Ctrl-C. What it costs is a whole chunk
+// of disk, 1800MB by default, that nothing on this machine mentions: the backup's record can be
+// cleared by a `delete` the run itself printed, after which `status` says "Unfinished none"
+// over 37MB of leftovers — measured in the e2e channel, three runs, 2026-09-09. `down` removes
+// them, and `down` is the command that removes everything, so somebody who only wants their
+// disk back has to be told here instead.
+//
+// Named, never removed — not by status and not by any other run. From outside the run that owns
+// one, a file being filled right now and a file left by a run that died are the same file, and
+// removing the first is the confident wrong answer this project refuses everywhere else. So the
+// listing says what is there and what the two possibilities are, and the person decides. That is
+// the same choice `down` makes about entries it did not put in the directory.
+function tempChunkLines(temp, configDir, error) {
+  // Not silence, because "nothing is there" is exactly what this cannot know: a directory
+  // that will not open may be holding a whole chunk. Said as the one line it is, with the
+  // rest of the report still around it, the same way a settings row that will not parse is.
+  if (error !== null) {
+    return [
+      '',
+      `${tempDirFor(configDir)} could not be read: ${error}. A backup made from a command`,
+      'buffers a chunk there, so there may be one holding up to a whole chunk of disk.',
+    ]
+  }
+
+  if (temp.length === 0) return []
+
+  const known = temp.filter((entry) => entry.size !== null)
+  const total = known.reduce((sum, entry) => sum + entry.size, 0)
+  // "at least" rather than a number that quietly leaves one out: a file whose size could not
+  // be read is still holding whatever it is holding.
+  const size = known.length === temp.length ? formatBytes(total) : `at least ${formatBytes(total)}`
+  const width = Math.max(...temp.map((entry) => entry.name.length))
+
+  const lines = [
+    '',
+    `${plural(temp.length, 'chunk file')}, ${size} in all, in ${tempDirFor(configDir)}:`,
+    '',
+  ]
+
+  for (const entry of temp) {
+    const held = entry.size === null ? 'size unknown' : formatBytes(entry.size)
+
+    lines.push(`  ${entry.name.padEnd(width)}  ${held}`)
+  }
+
+  lines.push('')
+  lines.push('A backup made from a command buffers one chunk here while it sends it and removes')
+  lines.push('it afterwards, so these are either runs happening right now or runs that were')
+  lines.push('killed before they could clean up. telstore does not remove them on its own — from')
+  lines.push('outside the run that owns one it cannot tell those two apart. Remove one with:')
+  lines.push(`  rm ${shellArg(temp[0].file)}`)
+
+  return lines
+}
+
 // Only the kinds actually present are named. "N backups" fits an upload and not a restore:
 // there the backup is finished and sitting in the chat, and it is the restore that stopped.
 function unfinishedCount(uploads, restores) {
@@ -240,7 +298,35 @@ export async function runStatus(options = {}, deps = {}) {
 
   log(row('Unfinished', unfinishedCount(uploads.length, restores.length)))
 
-  if (uploads.length === 0 && restores.length === 0) return
+  // Read before the records are printed and reported after them, and it has to be both: a
+  // machine with nothing unfinished on it is exactly where a stranded chunk hides, because
+  // that used to be where this report ended.
+  //
+  // Caught here for the reason every other failure in this command is: status is what someone
+  // runs *because* something is wrong, and an unreadable tmp directory must not take the
+  // account, the destination and the unfinished backups down with it.
+  let temp = []
+  let tempError = null
+
+  try {
+    temp = await listTempChunks(configDir)
+  } catch (err) {
+    tempError = err.message
+  }
+
+  if (uploads.length > 0 || restores.length > 0) {
+    for (const line of await unfinishedLines(uploads, restores, settings)) log(line)
+  }
+
+  for (const line of tempChunkLines(temp, configDir, tempError)) log(line)
+}
+
+// Everything below the rows: one indented block per unfinished transfer, newest first.
+// Split out of runStatus only so the temp-chunk listing after it cannot be skipped by an
+// early return — which is how it came to be missing in the first place.
+async function unfinishedLines(uploads, restores, settings) {
+  const lines = []
+  const log = (line) => lines.push(line)
 
   // The destination is what decides whether a resume command needs a --chat. A row that
   // failed to parse leaves nothing to compare against, which is not the same as a match.
@@ -319,4 +405,6 @@ export async function runStatus(options = {}, deps = {}) {
 
     for (const line of resumeLines(resume, state, destination, done)) log(line)
   }
+
+  return lines
 }

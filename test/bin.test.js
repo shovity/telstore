@@ -488,6 +488,15 @@ export async function connect() {
       return true
     },
     async sendFile() {
+      // Said before the send rather than after it, so a test can act while the chunk file is
+      // still on disk: that is the window the second Ctrl-C was measured landing in.
+      process.stderr.write('\\nSENDING\\n')
+
+      // A chunk that never reaches Telegram is the honest stand-in for one still uploading
+      // when the user gives up on it — the run is inside sendChunk, not inside a fill, so
+      // the finally that removes the chunk file is not going to run on its own.
+      if (process.env.TELSTORE_TEST_HANG_SEND === '1') await new Promise(() => {})
+
       // Slow on purpose: a signal has to be able to land between two chunks.
       await new Promise((resolve) => setTimeout(resolve, 150))
       nextId += 1
@@ -672,6 +681,76 @@ test(
     assert.equal(code, 130)
     assert.match(run.out.stderr, new RegExp(`npx telstore delete ${id} --chat me`))
     assert.doesNotMatch(run.out.stderr, /DELETED/)
+  },
+)
+
+// The disk half of that same ending. Measured in the throwaway e2e channel on 2026-09-09:
+// three runs, one second Ctrl-C apiece, 37MB of buffered chunks left under ~/.telstore/tmp
+// that the printed `delete` does not touch and `status` did not mention. The chunk file has
+// to still be there when the second signal lands, which is why the fake hangs inside the send
+// rather than between two chunks: a Ctrl-C during a fill unwinds through the loop's own
+// `finally` and takes the file with it, and that path was never the leak.
+test(
+  'a second Ctrl-C takes the chunk it was buffering with it',
+  { timeout: 30_000 },
+  async () => {
+    const { bin, home } = await fakeTelegram()
+    const tmp = path.join(home, '.telstore', 'tmp')
+    const run = drive(bin, ['bak', ...PRODUCER], { home, env: { TELSTORE_TEST_HANG_SEND: '1' } })
+
+    await run.until(/SENDING/)
+
+    // The control. Without it the assertion at the end would pass just as happily against a
+    // run that never wrote a chunk file at all.
+    const buffering = await fs.readdir(tmp)
+
+    assert.equal(buffering.length, 1)
+    assert.match(buffering[0], /\.chunk$/)
+
+    run.interrupt()
+    await run.until(/press Ctrl-C again/)
+    run.interrupt()
+
+    const code = await run.exited
+
+    // The send is still hanging and always will be, so leaving at all is the proof that
+    // giving the disk back waited on nothing that could hang.
+    assert.equal(code, 130)
+    assert.deepEqual(await fs.readdir(tmp), [])
+  },
+)
+
+// The rule this whole branch is about: when telstore leaves something on somebody's machine
+// it says so, even on the way out of a signal it was told not to wait on. Replacing the file
+// with a directory of the same name is a removal unlink refuses without touching the fd the
+// chunk is still open through — the same trick the discard test uses one layer down.
+test(
+  'a chunk it could not remove on the way out is named rather than left in silence',
+  { timeout: 30_000 },
+  async () => {
+    const { bin, home } = await fakeTelegram()
+    const tmp = path.join(home, '.telstore', 'tmp')
+    const run = drive(bin, ['bak', ...PRODUCER], { home, env: { TELSTORE_TEST_HANG_SEND: '1' } })
+
+    await run.until(/SENDING/)
+
+    const [name] = await fs.readdir(tmp)
+    await fs.unlink(path.join(tmp, name))
+    await fs.mkdir(path.join(tmp, name))
+
+    run.interrupt()
+    await run.until(/press Ctrl-C again/)
+    run.interrupt()
+
+    const code = await run.exited
+
+    assert.equal(code, 130)
+    assert.match(run.out.stderr, new RegExp(`still on this machine: ${path.join(tmp, name)}`))
+    assert.match(run.out.stderr, /remove it by hand/)
+
+    // And the line it was said alongside is still there: the chat is the more expensive of
+    // the two leftovers, and a warning about a file must not push it out.
+    assert.match(run.out.stderr, /Leaving now/)
   },
 )
 

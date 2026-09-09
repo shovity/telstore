@@ -5,9 +5,16 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { runDown } from '../src/commands/down.js'
-import { tempDirFor } from '../src/commands/upload-stream.js'
 import { configFile, saveConfig } from '../src/config.js'
-import { restoreKey, saveRestore, saveState, stateDir, stateKey, streamKey } from '../src/state.js'
+import {
+  restoreKey,
+  saveRestore,
+  saveState,
+  stateDir,
+  stateKey,
+  streamKey,
+  tempDirFor,
+} from '../src/state.js'
 import { LOGGED_IN, collect, tempDir } from './helpers.js'
 
 // Every test drives the question rather than a terminal: `confirm` that throws is how a test
@@ -332,8 +339,9 @@ test('down removes a state directory full of records', async () => {
 // unannounced. ~/.telstore/tmp is telstore's own — it is where a stream upload borrows one
 // chunk of disk at a time — so listing it under "Also there" would be down reporting its own
 // working directory as a stranger's file. tempDirFor is imported rather than the name being
-// retyped: a copy here would go on passing after the real one moved. Importing it into a
-// test is not importing it into down.js, which is what must never reach client.js.
+// retyped: a copy here would go on passing after the real one moved, which it since has —
+// state.js owns the name now, because `status` has to ask where that directory is without
+// importing the upload command.
 test('the temporary directory a stream upload borrows is not a foreign entry', async () => {
   const configDir = await tempDir('down')
   const out = collect()

@@ -110,12 +110,34 @@
   walk repeated three times. Anyone tempted to close the window at the source should still do
   it; nothing above stops being true.
 
-  **What the second Ctrl-C also strands, and nobody is told about: the chunk being buffered.**
-  `discard` never runs on the "leave now" path, so each of the three runs left a full
-  `~/.telstore/tmp/<id>-N.chunk` behind — 12MB apiece, 37MB after three. The printed `delete`
-  removes the chat side and drops the record, `status` then says "Unfinished none", and the
-  file stays. It is the same leak a `SIGKILL` leaves, on a path telstore prints instructions
-  for, and `down` is still the only thing that removes it.
+  **What the second Ctrl-C also stranded, and nobody was told about: the chunk being
+  buffered.** `discard` never runs on the "leave now" path, so each of the three runs left a
+  full `~/.telstore/tmp/<id>-N.chunk` behind — 12MB apiece, 37MB after three. The printed
+  `delete` removes the chat side and drops the record, `status` then said "Unfinished none",
+  and the file stayed. It was the same leak a `SIGKILL` leaves, on a path telstore prints
+  instructions for.
+
+  **Closed on the leave-now path by one syscall, and named everywhere else.** The run tells
+  `bin/telstore.js` which file it is buffering into (`onTempChunk`, said before the open and
+  unsaid after `discard`), and every exit the SIGINT handler leads to — the second Ctrl-C, the
+  cleanup deadline running out, a Ctrl-C on a run with nothing to unwind — `unlinkSync`s it on
+  the way past. That shape is forced, not chosen: the second Ctrl-C exists precisely because
+  the user will not wait for something that talks to the network, so the only thing allowed
+  here is local and unawaited. Microseconds, no socket, nothing that can hang. Unlinking a
+  file this process still has open is not a problem where it matters — on POSIX the name goes
+  now and the space comes back as the process dies, which is immediately — and a platform that
+  refuses to unlink an open file gets the leftover named on stderr instead, because a file
+  holding up to a whole chunk is not narration a `--silent` asked to be spared.
+
+  **The general case is a listing, not a sweep.** A SIGKILL, a crash or a machine losing power
+  still strands a chunk file, and nothing in a signal handler can help there. So `status` reads
+  `~/.telstore/tmp` and prints what is in it — each file, what it holds, the total, and an `rm`
+  — after the unfinished records rather than before, on the same run that says "Unfinished
+  none", which is the report the e2e leftovers hid behind. What it deliberately does not do is
+  remove them: from outside the run that owns one, a chunk being filled right this second and a
+  chunk left by a run that died are the same file, and a startup sweep that guessed would
+  destroy a live upload's buffer to tidy up. Naming it and leaving the decision to the person
+  is the same choice `down` makes about the files it did not put in the directory.
 
 - `verify` exists because nothing else answers "is this backup still restorable" without
   downloading it. It asks the chat about every chunk message the manifest names — still

@@ -30,7 +30,13 @@ run fails, because nothing will ever point at them again, and removing them is a
 round trip per batch. So a command may hand out an abort through `deps`; SIGINT calls it and
 the process stays alive while the run unwinds itself. A second Ctrl-C is somebody saying they
 will not wait, and it leaves at once with the id and the `delete` command that finishes the
-job by hand. A deadline (`CLEANUP_DEADLINE_MS`) says the same thing on its own, because the
+job by hand. The one piece of work it does before going is `unlinkSync` on the chunk file the
+run was buffering into, which the run itself would have removed had it been allowed to unwind:
+one local syscall, no await, nothing that can hang, since anything else here would be waiting
+on exactly what this exit refuses to wait for. It sits in `leave`, the funnel every exit the
+handler leads to comes through, so the deadline below gets it too. `docs/design/data-integrity.md`
+has the measurement that put it there and what `status` does about the endings no handler ever
+sees. A deadline (`CLEANUP_DEADLINE_MS`) says the same thing on its own, because the
 alternative to a deadline is a terminal held open by a network that is never coming back,
 with no way out but a keypress nobody has been told to press.
 
