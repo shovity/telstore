@@ -233,6 +233,23 @@ test('a second Ctrl-C leaves the id and the way to clean up by hand', () => {
   assert.match(message, /npx telstore delete telstore-1 --chat '@my backups'/)
 })
 
+// The one caller of deleteCommand's chatless branch, and until this test nothing anywhere
+// exercised it: a Ctrl-C landing before the run ever said where it was sending leaves the id,
+// which is the only part of the line worth having, rather than `--chat null` — a flag that
+// looks like a destination and would send runDelete to resolve one from config instead.
+test('a second Ctrl-C before the run named a chat prints the id and no --chat', () => {
+  const message = interruptMessage('upload', {
+    backupId: 'telstore-1',
+    stream: true,
+    again: true,
+    chat: null,
+  })
+
+  assert.match(message, /npx telstore delete telstore-1"/)
+  assert.doesNotMatch(message, /--chat/)
+  assert.doesNotMatch(message, /null|undefined/)
+})
+
 test('a stream upload interrupted before anything was sent promises nothing false', () => {
   const message = interruptMessage('upload', { stream: true })
 

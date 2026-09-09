@@ -26,9 +26,11 @@
   attaches a no-op `.catch` to `exited` on the spot, because the caller reads `stdout` first and
   only awaits `exited` at the end — a rejection with no handler yet is an `unhandledRejection`
   that takes the process down before the rollback can run.
-- **`src/stream.js` is pure**: `ChunkReader` takes a Readable and a file handle and knows
-  nothing about Telegram, chunks in a chat, or a child process, which is why it is tested
-  without either. Pulling through its own async iterator is also what gives backpressure for
+- **`src/stream.js` is pure**: `ChunkReader` takes a Readable, and a file handle is what each
+  `fill(handle, limit)` writes into — not something the constructor holds. That is what lets one
+  reader span a whole run: the stream is the long-lived thing and the chunk file is the
+  short-lived one, opened and discarded per chunk. It knows nothing about Telegram, chunks in a
+  chat, or a child process, which is why it is tested without either. Pulling through its own async iterator is also what gives backpressure for
   free — while a chunk uploads nothing calls `next()`, so the backlog waits in the pipe and in
   the child rather than in this process's memory, which for a 1800MB chunk is the difference
   between a temp file and an OOM. The chunk-cutting loop that uses it lives beside the upload

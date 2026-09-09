@@ -56,6 +56,7 @@ anything that row names** — not afterwards, and not only when something looks 
 | `src/commands/restore.js`, the resume scan | `docs/design/data-integrity.md` |
 | `src/commands/verify.js` | `docs/design/data-integrity.md` |
 | `src/commands/upload-stream.js`, `src/stream.js`, the stream rollback | `docs/design/data-integrity.md` |
+| `src/commands/status.js`, `src/shell.js`, any command telstore prints to be pasted | `docs/design/data-integrity.md` |
 | `src/stall.js`, `src/retry.js`, anything that waits on the network | `docs/design/stalls-and-retries.md` |
 | `src/token.js`, `src/session.js`, `src/commands/login.js`, `src/commands/token.js` | `docs/design/session-tokens.md` |
 | `src/commands/delete.js`, the delete path in `src/client.js` | `docs/design/delete.md` |
@@ -65,7 +66,7 @@ anything that row names** — not afterwards, and not only when something looks 
 | `src/caption.js`, `src/commands/list.js`, anything the chat shows | `docs/design/captions.md` |
 | `src/client.js`, `src/uploader.js`, `src/downloader.js`, `bin/telstore.js` | `docs/design/module-boundaries.md` |
 | `src/spawn.js`, the temp chunks under `~/.telstore/tmp` | `docs/design/module-boundaries.md` |
-| `src/prompt.js`, `src/confirm.js`, anything a terminal draws | `docs/design/terminal-prompts.md` |
+| `src/prompt.js`, `src/confirm.js`, `src/progress.js`, anything a terminal draws | `docs/design/terminal-prompts.md` |
 | the SIGINT handler in `bin/telstore.js`, any abort a command hands out | `docs/design/terminal-prompts.md` |
 | any call that hands an object to teleproto, or a test that fakes one | `docs/design/testing-blind-spots.md` |
 | chunk sizes, part sizes, `MAX_CHUNKS`, `MAX_CHUNK_SIZE` | `docs/design/telegram-limits.md` |

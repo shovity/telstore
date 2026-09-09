@@ -20,7 +20,7 @@ import {
 } from '../manifest.js'
 import { createStreamProgress, formatBytes, plural } from '../progress.js'
 import { requireChat, resolveSettings } from '../settings.js'
-import { shellArg } from '../shell.js'
+import { deleteCommand } from '../shell.js'
 import { spawnProducer } from '../spawn.js'
 import {
   MAX_STATES,
@@ -210,20 +210,20 @@ export async function runStreamUpload(name, childArgv, options = {}, deps = {}) 
       // command to name. The original failure is still said first — the rollback is what
       // happened next, not what went wrong.
       //
-      // The chat is always named, where `status` leaves --chat out when it matches the
-      // destination in force. status compares against the destination its own run resolved,
-      // which is the one the pasted command will resolve too. Here the destination in force
-      // may have come from a --chat on this command line, which the later `delete` will not
-      // carry: it would resolve its own chat from config and fire these ids at that peer
-      // instead, destroying whatever happens to carry them there. Naming a chat that turns
-      // out to be the default costs a few characters; leaving it out when it is not costs
-      // somebody else's messages, and nothing undoes that.
+      // The chat is always named, where `status` leaves --chat out of a *resume* when it
+      // matches the destination in force. status compares against the destination its own run
+      // resolved, which is the one the pasted command will resolve too. Here the destination
+      // in force may have come from a --chat on this command line, which the later `delete`
+      // will not carry: it would resolve its own chat from config and fire these ids at that
+      // peer instead, destroying whatever happens to carry them there. `deleteCommand` holds
+      // that rule for every place that prints this line; `chat` is required by the time a run
+      // has sent anything, so the chatless branch is not reachable from here.
       throw new Error(
         `${err.message}\n\ntelstore then removed ${removed} of the ` +
           `${plural(sent.length, 'message')} it had sent before Telegram refused: ` +
           `${cleanupErr.message}. The rest are still in ${chatName(chat)}. The local record ` +
           'was left in place on purpose — it is the only list of them on this machine. Run ' +
-          `"npx telstore delete ${shellArg(id)} --chat ${shellArg(chat)}" to remove them.`,
+          `"${deleteCommand(id, chat)}" to remove them.`,
       )
     }
 

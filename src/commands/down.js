@@ -5,7 +5,7 @@ import path from 'node:path'
 import { describeChat } from '../chat.js'
 import { configFile, defaultConfigDir, loadConfig } from '../config.js'
 import { askConfirm } from '../confirm.js'
-import { shellArg } from '../shell.js'
+import { deleteCommand, shellArg } from '../shell.js'
 import { listRestores, listStates } from '../state.js'
 
 // Nothing here may reach src/client.js, directly or through a command that does: `down` is
@@ -69,13 +69,22 @@ function sessionLine(config, error) {
   return 'not logged in'
 }
 
-// What an unfinished upload was of. A stream record has no path — its bytes came from a
-// command's stdout — and carries the name the backup was given instead. This listing exists
-// so that nothing goes unnamed before a recursive remove, so a row reading "undefined" is
-// the exact failure it is here to prevent.
-function describeSource(state) {
-  if (typeof state.path === 'string') return state.path
-  if (typeof state.name === 'string') return `${state.name} (a command's output)`
+// What an unfinished upload was of — either kind of record, which is why this is not the
+// `describeStreamSource` `status` has: that one answers only for a stream record, and one
+// name over two answers is how the two came to disagree. A stream record has no path — its
+// bytes came from a command's stdout — and carries the name the backup was given instead.
+// This listing exists so that nothing goes unnamed before a recursive remove, so a row
+// reading "undefined" is the exact failure it is here to prevent.
+//
+// Blank is the same failure wearing a string's clothes: a record holding `name: "   "` would
+// print `    (a command's output)` — a row that names nothing, in the one command whose job
+// is that nothing goes unnamed. Trimmed for that, exactly as `status` trims, and both fields
+// get the rule because a whitespace path is no more a name than a whitespace name is.
+function describeRecordSource(state) {
+  if (typeof state.path === 'string' && state.path.trim() !== '') return state.path
+  if (typeof state.name === 'string' && state.name.trim() !== '') {
+    return `${state.name} (a command's output)`
+  }
 
   return 'a record that does not say what it was backing up'
 }
@@ -87,18 +96,20 @@ function describeSource(state) {
 // in the chat names them. Printing the command removes nothing and opens no socket; it is the
 // naming this whole listing exists for, done for something that lives on Telegram.
 //
-// The chat is named for the reason status names it: `delete` resolves its own destination from
-// config, so a command pasted later without one would fire these ids at whatever chat is
-// configured then. A record that cannot say where its chunks went gets no command rather than
-// one that would guess: `--chat` missing is not `--chat` empty, and runDelete would take it as
-// no destination at all. The id needs no guard here — the listing above measures state.id.length
-// for its own column, so a record without one never reaches this line.
+// The chat is named for the reason status names it, and the line itself is built by
+// `deleteCommand` in shell.js so that all four places that print it spell `--chat` the same
+// way. The check in front of it is this command's own decision and stays here: a record that
+// cannot say where its chunks went gets no command at all rather than the chatless one that
+// function would otherwise hand back, because here that would be a guess — `--chat` missing is
+// not `--chat` empty, and runDelete would take it as no destination and resolve one from
+// config. The id needs no guard — the listing above measures state.id.length for its own
+// column, so a record without one never reaches this line.
 function removeCommand(state) {
   const chat = state.chat === null || state.chat === undefined ? '' : String(state.chat).trim()
 
   if (chat === '') return null
 
-  return `npx telstore delete ${shellArg(state.id)} --chat ${shellArg(chat)}`
+  return deleteCommand(state.id, chat)
 }
 
 // Only the ones actually on disk. A restore record survives a .partial that was deleted by
@@ -197,7 +208,9 @@ export async function runDown(args = [], options = {}, deps = {}) {
     log('run carry on: without them the same file goes up again as a new backup, and the chunks')
     log('already sent stay in the chat under these ids and nothing else:')
     log('')
-    for (const { state } of uploads) log(`  ${state.id.padEnd(width)}  ${describeSource(state)}`)
+    for (const { state } of uploads) {
+      log(`  ${state.id.padEnd(width)}  ${describeRecordSource(state)}`)
+    }
 
     const streams = uploads.filter(({ state }) => state.kind === 'stream')
 

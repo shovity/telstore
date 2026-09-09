@@ -369,6 +369,22 @@ test('down names a stream record by what produced it, not by a path it never had
   assert.doesNotMatch(out.text(), /undefined/)
 })
 
+// A blank name is the same failure as a missing one wearing a string's clothes, and down is
+// the one command whose stated job is that nothing goes unnamed before a recursive remove.
+// `status` already trimmed; down did not, so a record holding "   " printed a row that named
+// nothing in the report that exists to name everything.
+test('a stream record whose name is only spaces is reported as unnamed, not as blank', async () => {
+  const configDir = await tempDir('down')
+  const out = collect()
+  await saveConfig(LOGGED_IN, configDir)
+  await aStream(configDir, { id: 'telstore-blank', name: '   ' })
+
+  await runDown([], {}, { configDir, log: out.log, ...YES })
+
+  assert.match(out.text(), /telstore-blank\s+a record that does not say what it was backing up/)
+  assert.doesNotMatch(out.text(), /^\s+telstore-blank\s+\(a command's output\)$/m)
+})
+
 // The paragraph above the list says these records are what lets a second run carry on. That
 // is true of a file and false of a command's output: those bytes have gone past, and the
 // next run cuts them differently. Saying so is the difference between somebody re-running

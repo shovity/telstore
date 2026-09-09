@@ -68,8 +68,10 @@ a prompt that does not echo.
 ## What the chat looks like
 
 Every chunk goes up as a document captioned `📦 <backupId> · 3/12`, followed by a manifest
-carrying a summary card — file name, size, id, date and the restore command. `list` reads
-those cards straight out of the chat, no downloads:
+carrying a summary card — file name, size, id, date and the restore command. A backup made
+from a command's output is captioned `📦 <backupId> · 3`, with no total: it does not learn how
+many chunks there are until the last one has gone out, and the manifest card carries the final
+count. `list` reads those cards straight out of the chat, no downloads:
 
 ```
 Destination  https://web.telegram.org/k/#@my_backups
@@ -129,8 +131,17 @@ telstore reads:
 
 ```bash
 npx telstore a.tar -- tar cf ./a
-npx telstore dir.tar.age -- sh -c 'tar c ./dir | age -r age1abc...'
+npx telstore dir.tar.age -- bash -c 'set -o pipefail; tar c ./dir | age -r age1abc...'
 ```
+
+**`set -o pipefail` is load-bearing, not tidiness.** A shell exits with the status of the
+*last* command in a pipeline, so without it a `tar` that dies at 50% hands `age` a clean end
+of input; `age` encrypts what it got, exits 0, the shell exits 0, and the guarantee below is
+satisfied by a truncated archive that restores cleanly and matches every sha256. `pipefail`
+is what makes the shell report the producer's failure as its own. `bash` rather than `sh`
+because `sh` is `dash` on Debian and Ubuntu and `dash` has no `pipefail` — it refuses the line
+and exits 2 before writing a byte, which telstore turns into a failed run rather than a bad
+backup, but a shell that refuses is not an example anyone can paste.
 
 Nothing has to exist on disk first, which is the point: `tar` of a 200GB directory would
 otherwise need 200GB free before a single byte reached Telegram, and `pg_dump` leaves no file
@@ -156,9 +167,11 @@ being written goes too — and when it cannot read far enough back to be sure, i
 instead of reporting the backup gone.
 
 There is no shell in between: the command is spawned as an argv, so nothing needs quoting and
-telstore never builds a command string out of your arguments. `-- sh -c '...'` is how a pipeline
-gets in, and that is also how your data is compressed or encrypted **before** it reaches
-Telegram — `zstd`, `gpg`, `age` — with telstore holding nobody's passphrase. The command's
+telstore never builds a command string out of your arguments. `-- bash -c 'set -o pipefail;
+...'` is how a pipeline gets in — with `pipefail`, for the reason above: the biconditional is
+only as good as the exit code the shell reports, and a pipeline without it reports the wrong
+one. That is also how your data is compressed or encrypted **before** it reaches Telegram —
+`zstd`, `gpg`, `age` — with telstore holding nobody's passphrase. The command's
 stderr is left as it is, so one that fails explains itself in its own words and telstore adds
 only the exit code and what it did about it.
 

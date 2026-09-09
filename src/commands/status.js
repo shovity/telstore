@@ -7,7 +7,7 @@ import { configFile, defaultConfigDir, loadConfig } from '../config.js'
 import { formatBytes, plural } from '../progress.js'
 import { assertLoggedIn } from '../session.js'
 import { resolveSettings } from '../settings.js'
-import { shellArg } from '../shell.js'
+import { deleteCommand, shellArg } from '../shell.js'
 import { canResume, listRestores, listStates, listTempChunks, tempDirFor } from '../state.js'
 
 const LABEL_WIDTH = 'Destination'.length + 2
@@ -29,28 +29,28 @@ function field(label, value) {
 // name the one the chunks are already in — unless the destination in force is that chat
 // anyway, where --chat would just be noise. Not knowing the destination counts as not matching:
 // leaving --chat out would be a guess about where a backup already in progress went.
+//
+// The delete command this file also prints does the opposite and always names the chat, and
+// the two are not the same risk: a resume is the same upload again, and runUpload refuses
+// outright to send the rest of a backup somewhere else, while a delete pasted a week later
+// would destroy whatever happens to carry those ids in the chat it resolves. That rule lives
+// in `deleteCommand` in shell.js, for all four places that print the line; `recordChat` below
+// is what keeps this caller away from its chatless branch.
 function resumeCommand(state, destination) {
   const matches = destination !== null && state.chat === String(destination)
 
   return `npx telstore ${shellArg(state.path)}${matches ? '' : ` --chat ${shellArg(state.chat)}`}`
 }
 
-// `delete` resolves its own destination from config and then fires the record's message ids
-// at whatever peer that turns out to be, so the chat is always named — where a resume command
-// above leaves --chat out when the destination already matches. The two are not the same
-// risk: a resume is the same upload again, and runUpload refuses outright to send the rest of
-// a backup somewhere else. A delete pasted a week later, or run under a --chat this report
-// was given, would destroy whatever happens to carry those ids in the chat it resolves. The
-// few characters cost nothing; leaving them out costs somebody else's messages.
-function deleteCommand(id, chat) {
-  return `npx telstore delete ${shellArg(id)} --chat ${shellArg(chat)}`
-}
-
 // status is the command someone runs *because* something is wrong, so a record a truncated
 // write or a hand edit mangled is nearer its normal case than its edge case. These two read
 // what a stream record claims and say when it claims nothing, because the alternative is the
 // report this block was written to end: `From undefined`, `--chat undefined`.
-function describeSource(state) {
+//
+// Named for the record it reads, not for the job: `down` describes both kinds of record and
+// answers differently on purpose, and one name over two answers is how the two drifted apart
+// far enough that a whitespace-only name printed as blank in one of them.
+function describeStreamSource(state) {
   return typeof state.name === 'string' && state.name.trim() !== ''
     ? `${state.name} (a command's output)`
     : "a command's output this record does not name"
@@ -390,7 +390,7 @@ async function unfinishedLines(uploads, restores, settings) {
           ? 'with no manifest naming them'
           : 'and the manifest its record names'
 
-      log(field('From', describeSource(state)))
+      log(field('From', describeStreamSource(state)))
       log(field('Chunks', `${plural(done, 'chunk')} in the chat, ${manifest}`))
       log(field('Chat', chat === null ? 'the record does not say' : describeChat(chat)))
       log(

@@ -1,7 +1,7 @@
 import { basename } from 'node:path'
 import { parseArgs } from 'node:util'
 
-import { shellArg } from './shell.js'
+import { deleteCommand } from './shell.js'
 
 const SUBCOMMANDS = new Set([
   'login',
@@ -65,7 +65,10 @@ output ended and the command exited 0 — an end after a crash looks exactly lik
 success, and running the command is how telstore tells them apart. A backup made this way
 cannot be resumed, so a run that fails, and a Ctrl-C, remove the chunks already sent rather
 than keeping them for a second run there will never be. No shell stands in between: a pipeline
-goes in as -- sh -c '...', which is also where compression or encryption belongs.
+goes in as -- bash -c 'set -o pipefail; ...', which is also where compression or encryption
+belongs. The pipefail is not decoration — a shell reports the last command's exit status, so
+without it a producer that dies halfway through a pipeline still exits 0 and the manifest goes
+out for a truncated backup.
 
 down is logout taken all the way: it removes ~/.telstore entirely — the session, the api_id
 and api_hash, every setting and every resume record — and asks once before it does. It opens
@@ -141,11 +144,12 @@ export function interruptMessage(
 
     if (again) {
       // "may still" because this is said while the removal is halfway through and nobody
-      // knows how far it got. The chat is named for the same reason the rollback's own
-      // recovery line names it: a later `delete` resolves its destination from config, and
-      // these ids fired at the wrong peer destroy whatever happens to carry them there.
-      const where = chat === null ? '' : ` --chat ${shellArg(chat)}`
-      const removal = `npx telstore delete ${shellArg(backupId)}${where}`
+      // knows how far it got. `deleteCommand` is what names the chat, and why: a later
+      // `delete` resolves its destination from config, and these ids fired at the wrong peer
+      // destroy whatever happens to carry them there. A null chat here is a Ctrl-C that
+      // landed before the run said where it was sending — the chatless branch documented
+      // beside that function is for exactly this caller.
+      const removal = deleteCommand(backupId, chat)
 
       return (
         `\nLeaving now. Backup ${backupId} may still have chunks in the chat with no manifest ` +

@@ -71,12 +71,50 @@
   wrong arguments), `MAX_CHUNKS` reached (checked as the run goes, because there is no length to
   count from, and the way out is a bigger `--chunk-size` rather than a resume), an upload
   Telegram refused, and Ctrl-C.
+- **The biconditional is only as good as the exit code the shell reports, and a pipeline is
+  where a user hands telstore the wrong one.** `-- sh -c 'tar c ./dir | age -r …'` was the
+  documented way to compress or encrypt before the bytes leave, and it defeats the rule above
+  exactly: a shell exits with the status of the *last* command in a pipeline, so a `tar` that
+  dies at 50% closes its end, `age` reads a clean EOF, encrypts what it got and exits 0, the
+  shell exits 0, and telstore sends the manifest for a truncated archive that restores cleanly
+  and matches every sha256. Nothing inside telstore can see this — it is holding the shell's
+  exit code, and the shell is lying to it in good faith — so the only fix is that every
+  pipeline telstore documents carries `set -o pipefail`, which is what makes the shell report
+  the producer's failure as its own. `bash` and not `sh`: `/bin/sh` is `dash` on Debian and
+  Ubuntu, and `dash` has no `pipefail` — measured 2026-09-09, `sh -c 'set -o pipefail; …'`
+  prints "Illegal option -o pipefail" and exits 2 before writing a byte. That failure is the
+  safe one (a run that sent nothing, no manifest) but it is still an example nobody can paste,
+  which is why the README and the help text say `bash`.
 - **When the rollback itself fails, the record stays and is said to be the reason.** The network
   is usually what broke, so this is not a rare shape. The record is then the only list of those
   message ids on this machine, `status` reports it as leftover chunks rather than as something
   resumable, and the run prints the `npx telstore delete <id> --chat <chat>` that finishes the
   job — with the chat spelled out, because `runDelete` resolves its own destination from config
   and these ids fired at the wrong peer would destroy whatever happens to carry them there.
+
+- **A known limit, named because it was seen and not closed: telstore never checks that
+  Telegram actually deleted anything.** `deleteMessages` in `src/client.js` throws away what
+  `client.deleteMessages` hands back and counts `deleted += batch.length` for every batch the
+  call did not reject. "Removed 12 of 12" therefore means *asked for twelve and was not
+  refused*, which is a weaker claim than it reads as. Telegram can accept a delete and drop it:
+  in a basic group an account that is not an admin may only remove its own messages, and ids
+  outside a revoke window go the same way — the request succeeds, the messages stay. Where that
+  happens `rollback` returns clean, `clearState` removes the record, and the chunks are left in
+  the chat with nothing on this machine and no manifest in it naming them: the orphan the whole
+  rollback exists to prevent, reported as prevented. This is not the stream path's fault — it is
+  the same function `delete` runs, and it predates the stream work — and it has never been near
+  a test: the fake client returns whatever the test wants, and both real-account runs used a
+  channel the account owns, where the server has no reason to refuse. So it is unmeasured in
+  both directions; what is certain is only that nothing looks.
+  **What would close it**, in the order they cost: read `pts_count` off the
+  `messages.AffectedMessages` the call returns and compare it with the batch's length — the
+  cheap check, no extra round trip, and the one that would have to be measured first because
+  it needs to be true that Telegram counts the same things telstore does; or, sturdier and a
+  round trip per batch, look the ids up again afterwards through the same `getDocuments` path
+  `verify` uses and treat anything still there as a rollback that did not finish, which is a
+  case the code already knows how to report (the record stays, the recovery command prints).
+  Whoever closes it should also decide what a partial removal says, because "removed 9 of 12"
+  with the rest still in the chat is a different sentence from the one this file promises now.
 
 - **A run that leaves before its rollback has finished can leave behind a chunk its own record
   does not name.** Measured 2026-09-09 in the throwaway e2e channel, on stream uploads of 300MB

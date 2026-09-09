@@ -63,12 +63,24 @@ against Telegram: the binary runs out of a copied tree with `src/client.js` fake
 `docs/design/testing-blind-spots.md` explains — a real SIGINT, the real handler, the real exit
 path, and a stand-in for the network.
 
-**One contradiction is known and deliberately left.** A SIGINT landing in the sub-second window
-after the manifest has gone out but before the run has settled prints `Stopping. Backup … is
-removing the chunks it already sent`, and then the run's own `Done.` a moment later. Both lines
-were true when the code that wrote them ran; the last line and the exit code are the correct
-ones, and nothing is left behind in the chat or on disk. The fixes are worse than the flaw: a
-handler that first waits to find out how far the run got is a handler that does not answer
-Ctrl-C, which is the one thing this handler exists to do promptly. Everything *after* the run
-ends is already covered — the `settled` flag is checked before any of the messages, because
-said about a run that has finished they are all false at once.
+**One contradiction is known and deliberately left, and it is written here rather than only in
+a comment because it is a user-visible untruth and those get written down.** The window is
+between `sendManifest` returning inside `runStreamUpload` and the `finally` in
+`bin/telstore.js` setting `settled` — a handful of event-loop ticks, everything the run still
+has to do after the card is in the chat. A SIGINT landing in it prints `Stopping. Backup … is
+removing the chunks it already sent`, over a run that removes nothing, and then the run's own
+`Done.` a moment later and an exit code of 0 for a backup that is complete and valid. Both
+lines were true when the code that wrote them ran; the last line and the exit code are the
+correct ones, and nothing is left behind in the chat or on disk — which is why it ships. Note
+what is *not* claimed: the width of that window has never been measured, only reasoned about
+from what sits between the two points — two state writes, the closing line, and the client
+disconnect — every one of which is longer on a slow disk or a dead socket than the "moment"
+this paragraph used to call it.
+
+The fixes are worse than the flaw: a handler that first waits to find out how far the run got
+is a handler that does not answer Ctrl-C, which is the one thing this handler exists to do
+promptly, and a flag set a line earlier — before `sendManifest` rather than after the run —
+would move the lie rather than remove it, to a Ctrl-C that arrives while the manifest really is
+still going out. Everything *after* the run ends is already covered: the `settled` flag is
+checked before any of the messages, because said about a run that has finished they are all
+false at once.
