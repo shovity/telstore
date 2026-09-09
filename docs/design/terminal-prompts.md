@@ -36,13 +36,26 @@ with no way out but a keypress nobody has been told to press.
 
 **The deadline timer must not be `unref()`ed, and it will look to a later reader as though it
 should be.** A timer nothing awaits, in a process that exits when its run finishes, is exactly
-the shape of a handle somebody tidies away — and the suite stays green when they do, while the
-behaviour becomes the worst one available: with `.unref()` node leaves with **0** the instant
-nothing else is pending, which mid-rollback is true, so telstore reports success and exits
-while the chunks it promised to remove are still in the chat. That was measured against the
-real binary, not reasoned about. The timer does two jobs and only one of them is obvious: it
-is the deadline, and it is the one handle keeping the process alive for the rollback. The
-upload arm clears it in a `finally`, so a rollback that finishes normally never meets it.
+the shape of a handle somebody tidies away. It does two jobs and only one of them is obvious:
+it is the deadline, and it is the one handle keeping this process alive while the rollback
+runs. Node's own stdio handles do not hold the loop open, so as soon as the rollback is waiting
+on something that holds no handle either — a delete that has gone out and not come back — there
+is nothing pending, node leaves with **0**, and telstore reports success with the chunks it
+promised to remove still in the chat. That was measured, not reasoned about. The upload arm
+clears the timer in a `finally`, so a rollback that finishes normally never meets it.
+
+**What the gate catches of that, and what it does not.** Adding `.unref()` does turn
+`test/bin.test.js` red, in exactly one place: *a second Ctrl-C leaves at once and names what may
+still be in the chat* fails with `null !== 130`. That test hangs the fake's `deleteMessages` on
+purpose, which is precisely the rollback that holds no handle of its own. The first-Ctrl-C test
+stays green under the same mutation, because there the fake's delete is a 200ms `setTimeout` —
+a pending timer, holding the loop open for as long as the rollback takes, doing by accident the
+job the deadline is there to do on purpose. So the mutation is caught, by one test, through one
+shape of rollback; the ordinary shape is covered only by whatever the dependency happens to have
+pending, which is to say not covered. Green here is not a licence, and none of it is measured
+against Telegram: the binary runs out of a copied tree with `src/client.js` faked, which
+`docs/design/testing-blind-spots.md` explains — a real SIGINT, the real handler, the real exit
+path, and a stand-in for the network.
 
 **One contradiction is known and deliberately left.** A SIGINT landing in the sub-second window
 after the manifest has gone out but before the run has settled prints `Stopping. Backup … is

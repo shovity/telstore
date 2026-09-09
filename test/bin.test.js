@@ -466,6 +466,23 @@ export * from ${JSON.stringify(realClient)}
 let nextId = 1000
 
 export async function connect() {
+  // A stdout that cannot drain, kept that way for as long as the run lasts. The settled test
+  // below needs the process to be alive after its run has ended, and the only thing that holds
+  // it there is exitWhenFlushed waiting on output nobody is reading — that test never reads
+  // stdout, so the pipe fills and stays full.
+  //
+  // Written again every 10ms rather than once, and that is the whole of the fix for a flake.
+  // One 200KB write left the window standing on a single outstanding flush, and about one run
+  // in ten reached exitWhenFlushed with that flush already finished: node's stdio handles do
+  // not hold the loop open, so the process left immediately and the second Ctrl-C landed on
+  // nothing. Nothing about it was observable from here — the run had printed everything it was
+  // ever going to print. A write every 10ms means there is always one outstanding, the flush
+  // can never complete, and the process lives exactly the two seconds exitWhenFlushed's own
+  // safety net gives it. The interval is also a handle, so the loop cannot empty either.
+  if (process.env.TELSTORE_TEST_STALL_STDOUT === '1') {
+    setInterval(() => process.stdout.write('.'.repeat(100_000)), 10)
+  }
+
   return {
     async invoke() {
       return true
@@ -474,13 +491,6 @@ export async function connect() {
       // Slow on purpose: a signal has to be able to land between two chunks.
       await new Promise((resolve) => setTimeout(resolve, 150))
       nextId += 1
-      // More than a pipe holds, written once, so a test that never reads stdout leaves the
-      // final flush with nothing to drain into. That is the stall exitWhenFlushed waits two
-      // seconds for, and the only way to hold the window after the run open long enough to
-      // press Ctrl-C into it.
-      if (process.env.TELSTORE_TEST_STALL_STDOUT === '1' && nextId === 1001) {
-        process.stdout.write('.'.repeat(200_000))
-      }
       process.stderr.write('\\nSENT ' + nextId + '\\n')
       return { id: nextId }
     },
@@ -692,6 +702,12 @@ test(
 // and the process is only holding on for its own output to reach a pipe nobody is reading. Every
 // line the handler could otherwise reach for describes a run that is still going: a removal in
 // progress, leftovers to delete by hand, a resume for a backup that is finished.
+//
+// Two things make this a test rather than a coin toss. The settle line is written one statement
+// before `settled = true`, and a signal is only handled between turns of the loop, so a process
+// that has printed it has already set the flag. And the window it is signalled into is held open
+// by the stalled stdout the fake keeps writing into (see connect above), which is what stops the
+// process leaving before the second signal arrives.
 test(
   'Ctrl-C after the run has settled claims nothing about a run that is over',
   { timeout: 30_000 },

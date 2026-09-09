@@ -82,6 +82,16 @@ process open, and that the exit code is 130. None of those can be changed by tel
 a signature. The day one of those tests starts asserting something about what Telegram actually
 received, the trade has flipped and the fake is the wrong tool.
 
+One of those tests needs more than a stand-in for Telegram: it needs the process to still exist
+*after* its run has ended, and that window is manufactured — a stdout the test never reads, which
+the fake keeps filling, so `exitWhenFlushed` is left waiting on output that cannot drain. Built
+once as a single 200KB write, it flaked at about one run in ten: node's stdio handles do not hold
+the event loop open, so a run that reached the exit path with that one flush already finished
+left immediately and the second signal landed on nothing. Nothing about that was visible from the
+test — the run had printed everything it was ever going to print. The fix was to keep writing
+rather than to wait longer, because a test that passes because a margin got generous has stopped
+failing without becoming true, which is the worse of the two states.
+
 **And the reason `manifestMsgId` exists is invisible to a fake client entirely.** A stream
 record carries the id of the manifest it sent so that `delete` can find that card when
 `searchManifest` cannot — because Telegram's text index has been measured returning nothing for
