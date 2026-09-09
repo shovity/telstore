@@ -426,3 +426,18 @@ test('a negative chat id is still a chat id, not a command to run', () => {
 test('a subcommand that cannot take a command is refused by name', () => {
   assert.throws(() => route(['verify', 'telstore-1', '--', 'tar', 'x']), /verify/)
 })
+
+// --help asks what telstore does; it is never the mistake one of the terminator checks
+// above exists to catch, so it has to win no matter where a -- sits on the line.
+test('--help wins over every terminator check, in any of its spellings', () => {
+  assert.equal(route(['--help', '--', 'tar', 'cf', './a']).command, 'help')
+  assert.equal(route(['-h', '--', 'tar', 'cf', './a']).command, 'help')
+  assert.equal(route(['--help', '--']).command, 'help')
+})
+
+// The `help` subcommand is another spelling of the same request, so a terminator after it
+// is read the same way a terminator after --help is: as still asking for help, not as a
+// command for `help` to refuse the way `verify` and the rest do.
+test('the help subcommand wins over a terminator too', () => {
+  assert.equal(route(['help', '--', 'tar', 'cf']).command, 'help')
+})

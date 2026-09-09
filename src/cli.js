@@ -258,13 +258,6 @@ function filesNamedAfterNote(tokens) {
 export function route(argv) {
   const { head, childArgv } = splitAtTerminator(argv)
 
-  if (childArgv !== null && childArgv.length === 0) {
-    throw new Error(
-      'Missing the command after --: telstore has nothing to run and store. ' +
-        'Example: npx telstore a.tar -- tar cf ./a',
-    )
-  }
-
   const { values, positionals, tokens } = parseArgs({
     args: protectNegativeChatIds(head),
     options: OPTIONS,
@@ -274,6 +267,20 @@ export function route(argv) {
 
   const [first, ...rest] = positionals
   const filesAfterNote = filesNamedAfterNote(tokens)
+
+  // --help (or -h, or the `help` subcommand) always wins, terminator or not: someone typing
+  // `telstore --help -- tar cf ./a` is asking what telstore does, not making a mistake for
+  // one of the checks below to catch.
+  if (values.help || first === 'help') {
+    return { command: 'help', args: [], options: values, filesAfterNote, childArgv }
+  }
+
+  if (childArgv !== null && childArgv.length === 0) {
+    throw new Error(
+      'Missing the command after --: telstore has nothing to run and store. ' +
+        'Example: npx telstore a.tar -- tar cf ./a',
+    )
+  }
 
   // A terminator changes what "no name" and "which command" mean, so it is read before the
   // ordinary help/chat fallbacks get a chance to answer for it — those apply to a line that
@@ -310,15 +317,16 @@ export function route(argv) {
   // `telstore --chat @chan` with no file used to mean "remember this destination". Flags no
   // longer write anything, so that line now asks for a run that has nothing to upload —
   // say where the destination actually lives instead of printing help at someone who was
-  // perfectly clear about what they wanted.
-  if (first === undefined && values.chat && !values.help) {
+  // perfectly clear about what they wanted. (values.help already returned above, so reaching
+  // here means it was never set.)
+  if (first === undefined && values.chat) {
     throw new Error(
       `Nothing to upload. To change the destination for good, run "npx telstore config chat ${values.chat}". ` +
         'To use it for one run, pass --chat alongside a file or a command.',
     )
   }
 
-  if (values.help || first === undefined || first === 'help') {
+  if (first === undefined) {
     return { command: 'help', args: [], options: values, filesAfterNote, childArgv }
   }
 
