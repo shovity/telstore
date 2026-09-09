@@ -6,6 +6,7 @@ import path from 'node:path'
 import { promises as fs } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
+import { saveState, streamKey } from '../src/state.js'
 import { LOGGED_IN, tempDir } from './helpers.js'
 
 const run = promisify(execFile)
@@ -360,6 +361,31 @@ test('the offline commands do not load teleproto at all', async () => {
 // place to borrow a resume line from — would put teleproto back in its path unnoticed.
 test('down opens nothing, on a machine with nothing to remove', async () => {
   const home = await tempDir('down-offline')
+
+  assert.equal(await teleprotoScriptsLoadedBy(['down'], { HOME: home }), 0)
+})
+
+// An empty home never reaches the listing, so the test above only ever proved the early
+// return. A stream record is what makes down build a `delete` command — the one place it
+// writes a line about something that lives on Telegram, and therefore the one most likely to
+// borrow it from a module that knows how to reach Telegram.
+test('down opens nothing when it has chunks in a chat to name', async () => {
+  const home = await tempDir('down-offline-stream')
+  const configDir = path.join(home, '.telstore')
+
+  await saveState(
+    streamKey('telstore-20260909-7f3a91'),
+    {
+      v: 1,
+      kind: 'stream',
+      id: 'telstore-20260909-7f3a91',
+      chat: '@my_backups',
+      name: 'a.tar',
+      chunkSize: 1024,
+      done: { 0: { msgId: 5, size: 1024, sha256: 'x' } },
+    },
+    configDir,
+  )
 
   assert.equal(await teleprotoScriptsLoadedBy(['down'], { HOME: home }), 0)
 })

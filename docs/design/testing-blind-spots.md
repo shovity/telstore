@@ -68,3 +68,25 @@ available on the first day and was still wrong. And the replacement explanation 
 same suspicion as the one it replaced: "only new chats" was tidy, fit everything, took five
 minutes and one throwaway channel to disprove, and would have been believed indefinitely if
 nobody had built the measurement that could refute it.
+
+**The stream upload's Ctrl-C tests fabricate a client too, and that is the trade taken here on
+purpose.** They cannot use the ordinary fakes: what they test is a real SIGINT reaching the
+real `bin/telstore.js`, so the binary has to run as itself. `test/bin.test.js` copies `bin/`,
+`src/` and `package.json` into a temp directory, symlinks `node_modules`, and replaces exactly
+one file — `src/client.js`, the one door a session goes through — whose `connect` returns an
+object built by hand with `invoke`, `sendFile` and `destroy` on it. That is one more teleproto
+shape nobody checked against teleproto, which is what the paragraphs above are about. It is
+accepted because the property under test is **process lifetime**, not API surface: that the
+signal is answered, that the run unwinds before the process leaves, that the deadline holds the
+process open, and that the exit code is 130. None of those can be changed by teleproto changing
+a signature. The day one of those tests starts asserting something about what Telegram actually
+received, the trade has flipped and the fake is the wrong tool.
+
+**And the reason `manifestMsgId` exists is invisible to a fake client entirely.** A stream
+record carries the id of the manifest it sent so that `delete` can find that card when
+`searchManifest` cannot — because Telegram's text index has been measured returning nothing for
+documents that were plainly there (`docs/design/captions.md`), with nothing known that predicts
+when it happens. A fake `searchManifest` returns whatever the test hands it, so the fallback
+path is easy to test and the condition that makes it necessary cannot be reproduced at all. The
+same is true of the claim the whole feature rests on: only a real chat can show that a rolled
+back stream upload left nothing behind in it. Both belong to the `e2e` skill, not to `npm test`.

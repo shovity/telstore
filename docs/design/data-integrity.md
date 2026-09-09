@@ -41,6 +41,43 @@
   last rather than a dropped row or a thrown report: the file can vanish between the readdir
   and the stat, and `status` is the command someone runs *because* something is wrong.
 
+- **A stream upload has no re-stat to make, and the child's exit code is what stands in its
+  place.** `telstore a.tar -- tar cf ./a` reads a command's stdout, so there is no file to
+  stat, no length known up front and no `planChunks`. The rule that replaces it is a
+  biconditional, and it is the entire reason telstore spawns the command instead of accepting
+  `tar c ./dir | telstore`: **the manifest is sent if and only if stdout reached EOF and the
+  child exited 0.** When `tar` dies halfway it closes its end of the pipe, and on the reading
+  end an EOF after a crash is byte-for-byte the same event as an EOF after success — the exit
+  code goes to the shell, not to the reader, and by the time the shell knows, the manifest is
+  already in the chat. What that produces is the failure this project exists not to have: a
+  backup that restores cleanly, matches every sha256, and is a truncated archive. A parent
+  process sees the exit code, so telstore is the parent. Both halves are enforced, including
+  the odd one: a child that exits 0 while the stream itself errored sends no manifest either,
+  which is why `ChunkReader` latches a source error instead of asking the iterator again — an
+  async generator that has already thrown reports `done: true` on the next call, and left
+  unguarded that turns one real failure into a clean end of stream one call later.
+- **Every failure of a stream upload removes the chunks it already sent, and that is the
+  opposite of what the file path does on purpose.** `runUpload` keeps its chunks because the
+  next run resumes onto them — the record is the only pointer to them, which is why the bullet
+  above guards it so carefully. A stream cannot be resumed: the bytes have gone past and a
+  later run cuts them differently, so a chunk left behind by a failed stream is a chunk no
+  manifest will ever name, sitting in somebody's chat under an id nothing prints. Removing them
+  is part of failing, not a courtesy. Rollback deletes the ids this process has in hand rather
+  than the ones on disk, because a write to disk is one of the things that can have failed; the
+  manifest joins that list the moment it is sent, since a rollback that took the chunks and left
+  the card would leave a backup `list` advertises and `restore` cannot fulfil. The triggers are
+  every way a run can end badly — a non-zero exit or a signal, a command that cannot be spawned,
+  zero bytes written with a clean exit (a backup of nothing is not a backup, and it is usually
+  wrong arguments), `MAX_CHUNKS` reached (checked as the run goes, because there is no length to
+  count from, and the way out is a bigger `--chunk-size` rather than a resume), an upload
+  Telegram refused, and Ctrl-C.
+- **When the rollback itself fails, the record stays and is said to be the reason.** The network
+  is usually what broke, so this is not a rare shape. The record is then the only list of those
+  message ids on this machine, `status` reports it as leftover chunks rather than as something
+  resumable, and the run prints the `npx telstore delete <id> --chat <chat>` that finishes the
+  job — with the chat spelled out, because `runDelete` resolves its own destination from config
+  and these ids fired at the wrong peer would destroy whatever happens to carry them there.
+
 - `verify` exists because nothing else answers "is this backup still restorable" without
   downloading it. It asks the chat about every chunk message the manifest names — still
   there, still a document, still the file name telstore wrote, still the length recorded —

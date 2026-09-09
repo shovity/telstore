@@ -60,6 +60,14 @@ backup. A folder means the files one level inside it, and a pattern means the na
 one file is listed and confirmed before the first byte goes out. Run telstore again with only
 the files that are left to carry on after an interruption.
 
+A name followed by -- makes the backup out of what a command writes, so nothing has to be on
+disk first: npx telstore a.tar -- tar cf ./a. The manifest goes out only if that command's
+output ended and the command exited 0 — an end after a crash looks exactly like an end after
+success, and running the command is how telstore tells them apart. A backup made this way
+cannot be resumed, so a run that fails, and a Ctrl-C, remove the chunks already sent rather
+than keeping them for a second run there will never be. No shell stands in between: a pipeline
+goes in as -- sh -c '...', which is also where compression or encryption belongs.
+
 down is logout taken all the way: it removes ~/.telstore entirely — the session, the api_id
 and api_hash, every setting and every resume record — and asks once before it does. It opens
 no connection and deletes nothing from Telegram: the backups stay in the chat, and the session

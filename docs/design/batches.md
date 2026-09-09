@@ -54,6 +54,17 @@
   repeating the whole command line meets an overwrite prompt and then downloads them again
   from nothing. The ids that did not finish kept their `.partial` files and carry on where
   they stopped, which is why the message asks for those and not for the whole line.
+- **A stream upload has no batch, and there is nothing for one to do.** `route` refuses two
+  names before `--` — one command produces one stream, and there is nothing to give the second
+  name — so `runStreamUpload` is only ever the one run. Both halves of what a batch is for are
+  missing. There is no list to add up and confirm before the first byte, because the size of a
+  command's output is not knowable until the command has finished writing it: the question a
+  batch asks is "these files, this many bytes, to this chat?", and here two of those three are
+  answers nobody has yet. And there is nothing a second run could skip — the whole point of
+  naming the finished files in `interruptMessage` is that repeating the line would upload them
+  again, while a stream that stopped left nothing behind to repeat onto. `--yes` is therefore
+  irrelevant to this form rather than useful in it, and someone reaching for `telstore a.tar
+  b.tar -- tar c ./x` is told so by name rather than having one of the two names quietly win.
 - `runVerifies` is the one batch with no question in front of it: it removes nothing and
   writes nothing, so there is nothing to authorise. It is also the one where an id nothing
   can be found for is a single failed row rather than a refusal of the whole run — the

@@ -16,6 +16,7 @@ npx telstore config chat @my_backups           # where backups go, from now on
 npx telstore data.tar                          # split it and send it there
 npx telstore a.tar b.tar c.tar                 # or several: one backup each, one after another
 npx telstore ./backups                         # or a folder: every file one level inside it
+npx telstore a.tar -- tar cf ./a               # or from a command, with no file on disk first
 npx telstore list                              # what is already in the destination
 npx telstore restore telstore-20260905-7f3a91
 ```
@@ -26,6 +27,7 @@ npx telstore restore telstore-20260905-7f3a91
 |---|---|
 | `telstore login` | Log in to Telegram. Add `--token` to log in with a session token instead. |
 | `telstore <file\|folder\|pattern>...` | Split each file and upload it. Prints the `backupId` you restore with. |
+| `telstore <name> -- <command>...` | Run the command and store what it writes, under `<name>`. The manifest goes out only if the command exits 0. |
 | `telstore list` | The backups stored in the destination, newest first. |
 | `telstore restore <backup-id>...` | Download every chunk and reassemble the file. Several ids run one after another. |
 | `telstore verify <backup-id>...` | Check that every chunk of a backup is still in the chat. Downloads nothing. |
@@ -118,6 +120,44 @@ it, and the run ends with a line per file and a non-zero exit code:
   b.tar  failed: connection dropped mid-transfer
   c.tar  telstore-20260905-9de447  (1 chunk)
 ```
+
+## A backup made from a command
+
+`--` says the rest of the line is a command for telstore to run, and what that command writes
+to its standard output is the backup. The name in front of `--` is a label for it, not a file
+telstore reads:
+
+```bash
+npx telstore a.tar -- tar cf ./a
+npx telstore dir.tar.age -- sh -c 'tar c ./dir | age -r age1abc...'
+```
+
+Nothing has to exist on disk first, which is the point: `tar` of a 200GB directory would
+otherwise need 200GB free before a single byte reached Telegram, and `pg_dump` leaves no file
+to point telstore at in the first place.
+
+**The manifest is sent if and only if the command's output reached its end *and* the command
+exited 0.** That biconditional is the whole reason telstore runs the command itself instead of
+reading a pipe. When `tar` dies halfway it closes its end of the pipe, and an EOF after a crash
+is byte-for-byte the same event as an EOF after success — a reader on the other end cannot tell
+them apart, and would hand you a manifest for a truncated archive that restores cleanly, matches
+every sha256, and is garbage. A parent process sees the exit code.
+
+So a run that fails **removes the chunks it already sent.** That is the opposite of what a file
+upload does, and deliberately: a file upload keeps its chunks because a second run resumes onto
+them. A stream has no second run — the bytes have gone past, and a later run cuts them
+differently — so a chunk left in the chat by a failed stream is a chunk no manifest will ever
+name. Ctrl-C means the same thing here: telstore asks the run to remove what it sent and waits
+for it, rather than leaving where it stands. If the removal itself cannot finish, the record
+stays on this machine and the run prints the `npx telstore delete <id> --chat <chat>` that
+finishes it by hand.
+
+There is no shell in between: the command is spawned as an argv, so nothing needs quoting and
+telstore never builds a command string out of your arguments. `-- sh -c '...'` is how a pipeline
+gets in, and that is also how your data is compressed or encrypted **before** it reaches
+Telegram — `zstd`, `gpg`, `age` — with telstore holding nobody's passphrase. The command's
+stderr is left as it is, so one that fails explains itself in its own words and telstore adds
+only the exit code and what it did about it.
 
 ## Checking a backup is still there
 
@@ -212,6 +252,9 @@ There is no expiry and no revocation: to end a session for good, terminate it un
   else's infrastructure — the one thing telstore encrypts is a session token, and that
   protects your login rather than your files.
 - A chunk cannot exceed 1950MB: Telegram accepts at most 4000 parts of 512KB per file.
+- **A backup made from a command cannot be resumed**, so a run that fails or is interrupted
+  removes the chunks it had already sent instead of keeping them. Ctrl-C takes a moment longer
+  for that reason, and leaves nothing of that run behind in the chat.
 - Deleting a chunk message in the Telegram app destroys the backup, and keeping the
   `backupId` is what saves you hunting for its manifest in the chat by hand. `verify` is how
   you find that out before you need the file rather than after.

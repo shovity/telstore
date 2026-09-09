@@ -11,6 +11,17 @@
   only when some backup has one, cut to 40 characters there because the whole note is in the
   manifest and on the card for anyone reading it properly.
 
+- **A stream chunk's caption has no total, and that is safe only because nothing parses a chunk
+  caption.** `chunkCaption` writes `📦 <id> · 3/12`, and a backup made from a command does not
+  know the 12 until the last chunk has gone out — the count is the one thing a stream learns at
+  the end rather than the beginning. So those chunks are captioned `📦 <id> · 3`, and the
+  difference is only what a person scrolling the chat sees: `list` reads the manifest's card,
+  `restore`, `verify` and `delete` read the manifest itself, and `findManifestMessage` searches
+  the id, which Telegram indexes from the file name as well as the caption. Nothing anywhere
+  turns a chunk caption back into data. The final count is not lost either — the manifest card
+  carries it, and the card is what `list` shows. Anyone adding a reader of chunk captions has to
+  answer for this line before writing it: two shapes exist, and one of them has no total in it.
+
 - **`list` walks the chat; it does not search it.** It used to search for `#telstore`, which
   was the reason that tag existed. Measured 2026-09-07 in a broadcast channel a few minutes
   old: `#telstore` returned nothing, fifteen times over a minute, while the same chat handed

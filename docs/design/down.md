@@ -26,6 +26,20 @@ nothing removed that was not asked for, nothing reported gone that is still ther
   chunks sit in the chat under an id nothing on this machine remembers. So the ids are
   printed before the question. A restore record costs nothing — `pruneRestores` already
   records why: the evidence for a resume was never in the record, it is in the `.partial`.
+- **A record made from a command's output is printed as a `delete` command before it goes.**
+  The bullet above is about a loss that can be repaired by uploading the file again; this one
+  cannot be. A stream record cannot be carried on by any second run — those bytes came from a
+  command's stdout, they have gone past, and a later run cuts them differently — and once the
+  record is removed **nothing on this machine lists those message ids and no manifest in the
+  chat names them.** They are findable by nothing. So `down` prints
+  `npx telstore delete <id> --chat <chat>` for each of them, above the question, as the last
+  thing anything anywhere will say about those chunks. The chat is named for the reason `status`
+  names it: `delete` resolves its own destination from config, and a command pasted next week
+  without one would fire those ids at whatever chat is configured by then. A record that cannot
+  say where its chunks went gets a line explaining that instead of a command that would guess.
+  Printing removes nothing and opens no socket, which is what `test/bin.test.js` holds by
+  counting executed teleproto scripts on a `down` run over a directory that really has a stream
+  record in it — the earlier count only ever exercised the empty-home path.
 - **The `.partial` stays, and its note is not delete's note.** After a `delete` nothing can
   finish it, because the chunks are gone. After a `down` the chunks and the manifest are
   untouched, so the same file still resumes; saying otherwise would send somebody to delete
