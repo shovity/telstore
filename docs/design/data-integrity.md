@@ -78,12 +78,51 @@
   job — with the chat spelled out, because `runDelete` resolves its own destination from config
   and these ids fired at the wrong peer would destroy whatever happens to carry them there.
 
+- **A run that leaves before its rollback has finished can leave behind a chunk its own record
+  does not name.** Measured 2026-09-09 in the throwaway e2e channel, on stream uploads of 300MB
+  in 12MB chunks, with the second Ctrl-C sent 150ms after the first — the "press Ctrl-C again to
+  leave now and clean up by hand" path. Three runs: in **two** of them the chat afterwards held
+  three chunk messages while the local record named only two, and the
+  `npx telstore delete <id> --chat <chat>` line the process had just printed removed the two it
+  knew about, reported "Done", and left the third in the chat under an id nothing on this
+  machine prints any more. The third run leaked nothing, so it is a race and not a certainty.
+  The mechanism is the window `sent.push` cannot close from outside the process: the chunk that
+  was uploading when the abort landed goes on uploading, and `exitWhenFlushed` leaves the event
+  loop enough ticks for that chunk's `sendChunk` to reach Telegram — the leaked message's own
+  server timestamp was *after* the second Ctrl-C in both cases. Two controls say this belongs to
+  the "leave now" path alone and not to the rollback in general: three runs of the ordinary
+  single Ctrl-C, which waits, each removed every message they had sent and left the chat empty
+  by a walk repeated three times, and a `SIGKILL` mid-upload left a record naming exactly the
+  two messages that were actually there, which the printed `delete` then removed completely.
+  So the promise this file makes above — that the record is the only list of those message ids
+  and the printed command finishes the job — holds for every ending except the one where the
+  user refuses to wait, and there it is a list that can be one short. What the measurement could
+  not see: whether a slower link widens the window (all six runs ran at 8-12MB/s), and nothing
+  of the same shape against a rollback Telegram itself refuses, which cannot be arranged
+  against a real account without faking the client.
+
 - `verify` exists because nothing else answers "is this backup still restorable" without
   downloading it. It asks the chat about every chunk message the manifest names — still
   there, still a document, still the file name telstore wrote, still the length recorded —
   and that is all it can ask: the bytes inside are only proved by fetching them. So the
   closing line says so out loud rather than letting "verified" be read as more than it is.
   The first failing check per chunk wins, because "2 damaged" has to mean two chunks.
+- **Telegram answers about a deleted message with `MessageEmpty`; teleproto hands that to us as
+  `undefined`.** Both halves of `getDocuments`' guard —
+  `if (!message || message instanceof Api.MessageEmpty) continue` — look like one of them is
+  redundant, and neither is. Measured 2026-09-09 in the throwaway e2e channel: one chunk of a
+  three-chunk backup was deleted behind telstore's back, then the same four ids were asked for
+  both ways. Raw `channels.GetMessages` answered `MessageEmpty` carrying the id it was asked
+  about, in the position it was asked about; `client.getMessages(peer, { ids })` returned an
+  array of the same length with `undefined` in that position and the other three messages
+  untouched. So the `!message` half is the one that fires today and the `instanceof` half never
+  runs. Keep both anyway: the wire really does carry `MessageEmpty`, so a teleproto that stopped
+  mapping it would walk straight past a lone `!message` test, and a lone `instanceof` test would
+  read `.id` off `undefined` on the shape teleproto returns now. Either half alone is one
+  dependency change away from reporting a chunk that is gone as still present, which is exactly
+  the silent wrong answer `verify` exists to prevent — and no fake client has ever reproduced
+  either shape. What this could not see: only a deleted message, and only the teleproto this
+  repo pins.
 - `verify` goes through the full `parseManifest`, not the lenient `parseManifestJson` that
   `delete` takes. The two commands read a manifest for opposite reasons: `delete` reads one
   to destroy what it names, so a manifest failing its layout checks is exactly the broken
