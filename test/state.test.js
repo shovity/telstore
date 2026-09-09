@@ -5,6 +5,7 @@ import path from 'node:path'
 
 import {
   stateKey,
+  streamKey,
   loadState,
   saveState,
   markChunkDone,
@@ -314,6 +315,71 @@ test('canResume refuses a damaged path rather than throwing', async () => {
   const state = sampleState({ path: null })
 
   assert.deepEqual(await canResume('k1', state), { ok: false, reason: 'unreadable' })
+})
+
+function sampleStream(overrides = {}) {
+  return {
+    v: 1,
+    kind: 'stream',
+    id: 'telstore-20260905-7f3a91',
+    chat: '@my_backups',
+    name: 'a.tar',
+    chunkSize: 40,
+    done: {},
+    ...overrides,
+  }
+}
+
+test('streamKey is stable and shaped like stateKey', () => {
+  const a = streamKey('telstore-1')
+  const b = streamKey('telstore-1')
+
+  assert.equal(a, b)
+  assert.match(a, /^[0-9a-f]{40}$/)
+  assert.notEqual(a, streamKey('telstore-2'))
+})
+
+test('a stream record is never resumable, and answers without touching the disk', async () => {
+  const state = sampleStream()
+
+  assert.deepEqual(await canResume(streamKey('telstore-20260905-7f3a91'), state), {
+    ok: false,
+    reason: 'stream',
+  })
+})
+
+// The stream check has to run before the stat, not merely stand in for a failed one: a
+// stream record filed under a key that happens to match a real file on disk must still
+// read as unresumable, because nothing about that file changes what a stream record is.
+test('a stream record is refused even when its key matches a file that really exists', async () => {
+  const dir = await tempDir('state')
+  const { state: fileState, key } = await recordFor(dir)
+  const state = { ...fileState, kind: 'stream' }
+
+  assert.deepEqual(await canResume(key, state), { ok: false, reason: 'stream' })
+})
+
+test('a stream key is filed beside uploads and found by its backup id', async () => {
+  const dir = await tempDir('state')
+  const key = streamKey('telstore-1')
+  await saveState(key, sampleStream({ id: 'telstore-1' }), dir)
+
+  const found = await findStates('telstore-1', dir)
+
+  assert.equal(found.length, 1)
+  assert.equal(found[0].key, key)
+  assert.equal(found[0].state.kind, 'stream')
+})
+
+test('pruneStates counts a stream record against the same limit as file uploads, and can drop it', async () => {
+  const dir = await tempDir('state')
+  await saveStateAged(streamKey('telstore-old-stream'), sampleStream({ id: 'telstore-old-stream' }), dir, 300)
+  await saveStateAged('new', sampleState({ id: 'telstore-new' }), dir, 100)
+
+  const dropped = await pruneStates(dir, 1)
+
+  assert.deepEqual(dropped.map((s) => s.id), ['telstore-old-stream'])
+  assert.deepEqual((await listStates(dir)).map(({ state }) => state.id), ['telstore-new'])
 })
 
 function sampleRestore(overrides = {}) {

@@ -16,6 +16,14 @@ export function stateFile(key, configDir = defaultConfigDir()) {
   return path.join(stateDir(configDir), `${key}.json`)
 }
 
+// stateKey hashes path:size:mtime, and a stream has none of the three. What holds still is
+// the backup id, and hashing it keeps the file name in the same 40-hex shape the directory
+// already sorts, prunes and filters on — a stream record is an upload record, not a third
+// kind, so it shares that namespace rather than getting a prefix of its own.
+export function streamKey(backupId) {
+  return createHash('sha1').update(`stream:${backupId}`).digest('hex')
+}
+
 // A restore's record is filed beside the uploads and must never compete with them for a
 // prune slot. Losing an upload record strands chunks in a chat where only the id can still
 // find them, which is why pruneStates reads each file back to name what it drops; losing a
@@ -218,6 +226,13 @@ export async function findStates(backupId, configDir = defaultConfigDir()) {
 // Never throws. status calls this for every record it prints, and one damaged path must not
 // take the rest of the report down with it.
 export async function canResume(key, state) {
+  // A stream cannot be resumed by anyone, so this is not a question about a file. Answering
+  // it by stat-ing state.path would report "missing" for a record that never had a path,
+  // and status would then offer a resume command that starts a brand new backup. This has
+  // to run before the stat below, not after it fails: a stream record's key could still
+  // happen to match a real file on disk, and that file is not what makes it unresumable.
+  if (state.kind === 'stream') return { ok: false, reason: 'stream' }
+
   let stat
 
   try {
