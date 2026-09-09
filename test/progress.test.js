@@ -83,12 +83,34 @@ test('a stream line reports what was sent and how fast, and claims no percentage
 
 test('a stream bar pads a shrinking line so no tail of the last one survives', () => {
   const lines = []
-  const bar = createStreamProgress({ label: 'Chunk 1', write: (l) => lines.push(l), now: fakeClock() })
+  const bar = createStreamProgress({
+    // A label that shrinks by more than thirty characters is what makes this test able to
+    // fail: the unpadded render of the second line is genuinely shorter than the first, not
+    // shorter by coincidence of how the byte counts happen to format.
+    label: 'Uploading the archive to the backup chat',
+    write: (l) => lines.push(l),
+    now: fakeClock(),
+  })
   bar.advance(1024 * 1024 * 1024)
   bar.setLabel('Chunk 2')
   bar.finish()
+
   const widths = lines.map((l) => l.replace(/^\r/, '').replace(/\n$/, '').length)
-  assert.ok(widths.every((w) => w === Math.max(...widths)))
+
+  // Sanity check on the fixture itself: without padding, the line drawn by setLabel would be
+  // shorter than the one before it. If this ever stops being true the test has gone vacuous
+  // again and the label needs to shrink by more.
+  assert.ok(
+    renderStreamProgress({ done: 1024 * 1024 * 1024, elapsedMs: 1000, label: 'Chunk 2' }).length <
+      renderStreamProgress({
+        done: 1024 * 1024 * 1024,
+        elapsedMs: 1000,
+        label: 'Uploading the archive to the backup chat',
+      }).length,
+    'the fixture must make the second line shorter than the first, unpadded',
+  )
+
+  assert.ok(widths.every((w) => w === Math.max(...widths)), 'every line is padded to the widest one drawn so far')
 })
 
 test('createProgress coalesces updates that arrive too close together', () => {
