@@ -24,6 +24,7 @@ async function writeFully(handle, buffer) {
 // the backlog stays in the pipe instead of in this process.
 export class ChunkReader {
   constructor(readable) {
+    this.readable = readable
     this.iterator = readable[Symbol.asyncIterator]()
     this.pending = null
     this.ended = false
@@ -84,14 +85,34 @@ export class ChunkReader {
   // releases the stream, so a producer blocked writing into a pipe nobody is reading stops
   // being blocked. Nothing it has to say can matter by then, because an error is already on
   // its way out of the caller, so a refusal to close is swallowed rather than thrown over it.
+  //
+  // The source is destroyed as well, and not for symmetry. `return()` on an async generator
+  // that has never been started does not run the body, so it never reaches the `finally` a
+  // Node stream's iterator destroys the stream in — measured on node 22, not assumed. A
+  // reader closed before its first fill() would otherwise leave the child blocked on a pipe
+  // with nothing to unblock it.
   async close() {
-    this.ended = true
+    // An abort is not an end. Arming the same sticky error a producer's own failure sets is
+    // what stops a later fill() answering `eof: true` for a read that stopped with bytes
+    // still unread — mistaking one for the other is the thing this class exists to refuse.
+    // `??=` because the reason the source stopped is worth more than the fact that telstore
+    // then closed it, and close() runs on the path where that reason is already on its way
+    // out to the caller.
+    this.error ??= new Error(
+      'The stream was closed before it ended, so nothing more can be read from it.',
+    )
     this.pending = null
 
     try {
       await this.iterator.return?.()
     } catch {
       // Nothing here can change what already went wrong.
+    }
+
+    try {
+      this.readable.destroy?.()
+    } catch {
+      // As above.
     }
   }
 }

@@ -20,6 +20,7 @@ import {
 } from '../manifest.js'
 import { createStreamProgress, formatBytes, plural } from '../progress.js'
 import { requireChat, resolveSettings } from '../settings.js'
+import { shellArg } from '../shell.js'
 import { spawnProducer } from '../spawn.js'
 import {
   MAX_STATES,
@@ -154,7 +155,10 @@ export async function runStreamUpload(name, childArgv, options = {}, deps = {}) 
       throw err
     }
 
-    warn(`\nRemoving the ${plural(sent.length, 'chunk')} this run already sent...\n`)
+    // "message" rather than "chunk": the manifest joins this list on the narrow path where a
+    // run fails after sending it, and a count that says "3 chunks" for two chunks and a card
+    // is telstore describing the chat wrongly in the one report someone reads closely.
+    warn(`\nRemoving the ${plural(sent.length, 'message')} this run already sent...\n`)
 
     const loud = sent.length > MESSAGE_BATCH_SIZE
     let removed = 0
@@ -164,7 +168,7 @@ export async function runStreamUpload(name, childArgv, options = {}, deps = {}) 
         retryOptions: { ...retryOptions, onRetry },
         onBatch: (done, total) => {
           removed = done
-          if (loud) warn(`\rRemoving chunk messages ${done}/${total}…`)
+          if (loud) warn(`\rRemoving messages ${done}/${total}…`)
         },
       })
     } catch (cleanupErr) {
@@ -173,11 +177,21 @@ export async function runStreamUpload(name, childArgv, options = {}, deps = {}) 
       // this record through findStates when it finds no manifest, which is why that is the
       // command to name. The original failure is still said first — the rollback is what
       // happened next, not what went wrong.
+      //
+      // The chat is always named, where `status` leaves --chat out when it matches the
+      // destination in force. status compares against the destination its own run resolved,
+      // which is the one the pasted command will resolve too. Here the destination in force
+      // may have come from a --chat on this command line, which the later `delete` will not
+      // carry: it would resolve its own chat from config and fire these ids at that peer
+      // instead, destroying whatever happens to carry them there. Naming a chat that turns
+      // out to be the default costs a few characters; leaving it out when it is not costs
+      // somebody else's messages, and nothing undoes that.
       throw new Error(
         `${err.message}\n\ntelstore then removed ${removed} of the ` +
-          `${plural(sent.length, 'chunk')} it had sent before Telegram refused: ` +
-          `${cleanupErr.message}. The rest are still in ${chatName(chat)} with no manifest ` +
-          `pointing at them. Run "npx telstore delete ${id}" to remove them.`,
+          `${plural(sent.length, 'message')} it had sent before Telegram refused: ` +
+          `${cleanupErr.message}. The rest are still in ${chatName(chat)}. The local record ` +
+          'was left in place on purpose — it is the only list of them on this machine. Run ' +
+          `"npx telstore delete ${shellArg(id)} --chat ${shellArg(chat)}" to remove them.`,
       )
     }
 
@@ -332,7 +346,7 @@ export async function runStreamUpload(name, childArgv, options = {}, deps = {}) 
         chunks: Array.from({ length: count }, (_, i) => ({ i, ...state.done[String(i)] })),
       })
 
-      await sendManifest(client, chat, {
+      const card = await sendManifest(client, chat, {
         bytes: serializeManifest(manifest),
         fileName: manifestFileName(id),
         caption: manifestCaption({
@@ -344,6 +358,15 @@ export async function runStreamUpload(name, childArgv, options = {}, deps = {}) 
           note: manifest.note ?? null,
         }),
       })
+
+      // The manifest is a message this run put in the chat like any other. Anything that
+      // fails after this line — the record write below, the closing line written into a pipe
+      // that has gone away — still rolls back, and a rollback that took the chunks but left
+      // this would leave a backup `list` advertises and `restore` cannot fulfil. Pushed last
+      // so it is removed last, the order `delete` keeps for the same reason: the manifest is
+      // the only index of the ids under it, so it is the one thing worth having if a removal
+      // stops halfway.
+      sent.push(card.id)
 
       await clearState(key, configDir)
 

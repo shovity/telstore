@@ -610,6 +610,71 @@ test('a rollback that fails keeps the record and says what to run', async () => 
   )
 })
 
+// The manifest is a message this run put in the chat like any other, so it goes back with
+// everything else. Rolling back only the chunks would leave telstore-….manifest.json sitting
+// there with every chunk it names gone — a backup `list` advertises and `restore` cannot
+// fulfil, which is the exact promise this rollback exists to keep.
+test('a failure after the manifest lands takes the manifest with it', async () => {
+  const ws = await workspace()
+  const client = fakeClient()
+  let id = null
+
+  await assert.rejects(
+    () =>
+      runStreamUpload(
+        'a.tar',
+        ['tar', 'cf', './a'],
+        { 'chunk-size': '10' },
+        streamDeps(client, ws, {
+          spawn: fakeSpawn([TEN, FIVE]),
+          silent: false,
+          writeErr: () => {},
+          // Writing the closing line is a real thing that fails: `telstore … | head` closes
+          // the pipe under telstore's feet and console.log throws EPIPE.
+          log: (line) => {
+            if (line.startsWith('\nDone.')) throw new Error('EPIPE: broken pipe')
+          },
+          onBackupId: (backupId) => {
+            id = backupId
+          },
+        }),
+      ),
+    /EPIPE: broken pipe/,
+  )
+
+  assert.deepEqual(client.messages, [])
+  assert.deepEqual(await findStates(id, ws.configDir), [])
+})
+
+// `delete` resolves its own destination from config, then fires the record's message ids at
+// whatever peer that turns out to be. A recovery command printed without --chat would, for a
+// run that used --chat, name ids belonging to one chat and delete whatever carries those ids
+// in another — destroying someone else's messages, which nothing can undo.
+test('the recovery command names the chat the chunks are actually in', async () => {
+  const ws = await workspace({ chat: '@store' })
+  const client = fakeClient()
+
+  await assert.rejects(
+    () =>
+      runStreamUpload(
+        'a.tar',
+        ['tar', 'cf', './a'],
+        { 'chunk-size': '10', chat: '@other' },
+        streamDeps(client, ws, {
+          spawn: fakeSpawn([TEN, TEN], { code: 2 }),
+          deleteMessages: async () => {
+            throw new Error('connection dropped')
+          },
+        }),
+      ),
+    (err) => {
+      assert.match(err.message, /npx telstore delete telstore-\S+ --chat @other/)
+      assert.equal(err.message.includes('@store'), false)
+      return true
+    },
+  )
+})
+
 test('a chunk that Telegram refuses rolls back the chunks before it', async () => {
   const ws = await workspace()
   const client = fakeClient({ failOnChunk: 1 })

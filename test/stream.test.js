@@ -186,3 +186,65 @@ test('a short write from the handle is retried until the whole buffer lands', as
   assert.equal(Buffer.concat(handle.calls).toString(), 'abcdefghij')
   assert.ok(handle.calls.length > 1, 'a handle limited to 3 bytes per call must be called more than once')
 })
+
+// close() is what a failed upload calls on the way out, and what it releases is the source:
+// an abandoned iterator holds a real child's stdout open, so a producer blocked writing into
+// a pipe nobody is reading goes on waiting for a reader that is never coming back.
+test('close releases the source', async () => {
+  const stdout = Readable.from([Buffer.from('abc'), Buffer.from('def')])
+  const reader = new ChunkReader(stdout)
+
+  await reader.close()
+
+  assert.equal(stdout.destroyed, true)
+})
+
+test('close on a source that refuses to be closed does not throw', async () => {
+  const reader = new ChunkReader({
+    [Symbol.asyncIterator]: () => ({
+      next: async () => ({ value: Buffer.from('ab'), done: false }),
+      return: async () => {
+        throw new Error('the producer refused to stop')
+      },
+    }),
+  })
+
+  await reader.close()
+})
+
+// An abort is not an end. A fill after close reporting `eof: true` would be this class making
+// exactly the mistake it exists to prevent — a read that stopped with bytes still unread,
+// handed back as a stream that finished — so close arms the same sticky error a producer's
+// own failure would.
+test('a fill after close is refused rather than reported as a clean end', async () => {
+  const dir = await tempDir('stream')
+  const file = path.join(dir, 'chunk')
+  const reader = new ChunkReader(Readable.from([Buffer.from('abc'), Buffer.from('def')]))
+
+  await reader.close()
+
+  const handle = await fs.open(file, 'w')
+  await assert.rejects(() => reader.fill(handle, 100), /closed before it ended/)
+  await handle.close()
+})
+
+// The reason the source stopped is worth more than the fact that telstore then closed it, and
+// close runs on a path where that error is already on its way out to the caller.
+test('close does not overwrite the error the source already threw', async () => {
+  const dir = await tempDir('stream')
+  const file = path.join(dir, 'chunk')
+  const broken = Readable.from((async function* () {
+    throw new Error('producer exploded')
+  })())
+  const reader = new ChunkReader(broken)
+
+  const first = await fs.open(file, 'w')
+  await assert.rejects(() => reader.fill(first, 100), /producer exploded/)
+  await first.close()
+
+  await reader.close()
+
+  const second = await fs.open(file, 'w')
+  await assert.rejects(() => reader.fill(second, 100), /producer exploded/)
+  await second.close()
+})
