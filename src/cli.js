@@ -36,6 +36,8 @@ export const HELP = `telstore — split large files into chunks and store them o
 Usage:
   npx telstore login                      Log in to Telegram, only needed once
   npx telstore <file|folder|pattern>...   Split files and upload them to Telegram
+  npx telstore <name> -- <command>...     Store what a command writes, under <name>
+  npx telstore restore <id> -- <command>  Pipe a restore into a command instead of a file
   npx telstore list                       List the backups stored in the destination
   npx telstore list --search <text>       List only the backups that text appears in
   npx telstore restore <backup-id>...     Download the chunks and reassemble the files
@@ -187,6 +189,18 @@ export function interruptMessage(command, { backupId, done = [] } = {}) {
   return '\nStopped.\n'
 }
 
+// The one `--` this file did not write. protectNegativeChatIds, below, inserts one of its
+// own to rescue a negative chat id from parseArgs, so the position has to be taken off the
+// argv as typed — afterwards the two are indistinguishable, and `config chat -100123` would
+// become a command telstore tries to run.
+function splitAtTerminator(argv) {
+  const at = argv.indexOf('--')
+
+  if (at === -1) return { head: argv, childArgv: null }
+
+  return { head: argv.slice(0, at), childArgv: argv.slice(at + 1) }
+}
+
 // A channel id is negative, and typing it separated by a space is the natural reflex — but
 // parseArgs rejects anything starting with a dash as an option, and reports it as one:
 // `config chat -100123` fails with "Unknown option '-1'", naming a flag nobody typed.
@@ -242,8 +256,17 @@ function filesNamedAfterNote(tokens) {
 }
 
 export function route(argv) {
+  const { head, childArgv } = splitAtTerminator(argv)
+
+  if (childArgv !== null && childArgv.length === 0) {
+    throw new Error(
+      'Missing the command after --: telstore has nothing to run and store. ' +
+        'Example: npx telstore a.tar -- tar cf ./a',
+    )
+  }
+
   const { values, positionals, tokens } = parseArgs({
-    args: protectNegativeChatIds(argv),
+    args: protectNegativeChatIds(head),
     options: OPTIONS,
     allowPositionals: true,
     tokens: true,
@@ -251,6 +274,38 @@ export function route(argv) {
 
   const [first, ...rest] = positionals
   const filesAfterNote = filesNamedAfterNote(tokens)
+
+  // A terminator changes what "no name" and "which command" mean, so it is read before the
+  // ordinary help/chat fallbacks get a chance to answer for it — those apply to a line that
+  // never named a command to run at all.
+  if (childArgv !== null) {
+    if (first !== undefined && SUBCOMMANDS.has(first)) {
+      if (first !== 'restore') {
+        throw new Error(
+          `${first} takes no command after --. Only an upload (npx telstore a.tar -- tar cf ./a) ` +
+            'and a restore (npx telstore restore <id> -- tar x) read one.',
+        )
+      }
+
+      return { command: first, args: rest, options: values, filesAfterNote, childArgv }
+    }
+
+    if (positionals.length === 0) {
+      throw new Error(
+        'Missing a name before --. telstore stores what the command writes under a name you ' +
+          'choose, and there is nothing to take one from. Example: npx telstore a.tar -- tar cf ./a',
+      )
+    }
+
+    if (positionals.length > 1) {
+      throw new Error(
+        `One command produces one stream, so telstore takes one name before -- and got ` +
+          `${positionals.length}: ${positionals.join(', ')}. Run telstore once per backup.`,
+      )
+    }
+
+    return { command: 'upload', args: positionals, options: values, filesAfterNote, childArgv }
+  }
 
   // `telstore --chat @chan` with no file used to mean "remember this destination". Flags no
   // longer write anything, so that line now asks for a run that has nothing to upload —
@@ -264,14 +319,14 @@ export function route(argv) {
   }
 
   if (values.help || first === undefined || first === 'help') {
-    return { command: 'help', args: [], options: values, filesAfterNote }
+    return { command: 'help', args: [], options: values, filesAfterNote, childArgv }
   }
 
   if (SUBCOMMANDS.has(first)) {
-    return { command: first, args: rest, options: values, filesAfterNote }
+    return { command: first, args: rest, options: values, filesAfterNote, childArgv }
   }
 
   // Every positional, not just the first: `telstore a b c` used to upload `a` and drop the
   // rest without a word, which is the one thing this project never does.
-  return { command: 'upload', args: positionals, options: values, filesAfterNote }
+  return { command: 'upload', args: positionals, options: values, filesAfterNote, childArgv }
 }

@@ -380,3 +380,49 @@ test('route reports no file after a note the shell kept whole', () => {
   assert.equal(route(['not-found', '--note', 'march']).filesAfterNote, false)
   assert.equal(route(['a.tar']).filesAfterNote, false)
 })
+
+test('a name before -- is a stream upload, and the rest is the command', () => {
+  const r = route(['a.tar', '--', 'tar', 'cf', './a'])
+  assert.equal(r.command, 'upload')
+  assert.deepEqual(r.args, ['a.tar'])
+  assert.deepEqual(r.childArgv, ['tar', 'cf', './a'])
+})
+
+test('flags still belong to telstore when they come before the terminator', () => {
+  const r = route(['a.tar', '--chat', '@store', '--', 'tar', 'cf', './a'])
+  assert.equal(r.options.chat, '@store')
+  assert.deepEqual(r.childArgv, ['tar', 'cf', './a'])
+})
+
+test("the child's own flags are never read as telstore's", () => {
+  const r = route(['a.tar', '--', 'tar', '--verbose', '-C', './a'])
+  assert.deepEqual(r.childArgv, ['tar', '--verbose', '-C', './a'])
+  assert.equal(r.options.verbose, undefined)
+})
+
+test('an ordinary upload has no childArgv', () => {
+  assert.equal(route(['data.tar']).childArgv, null)
+})
+
+test('a missing name before -- is refused rather than read as the command name', () => {
+  assert.throws(() => route(['--', 'tar', 'cf', './a']), /name before --/)
+})
+
+test('two names before -- are refused: one command produces one stream', () => {
+  assert.throws(() => route(['a.tar', 'b.tar', '--', 'tar', 'c', './x']), /one name/)
+})
+
+test('a terminator with nothing after it is refused', () => {
+  assert.throws(() => route(['a.tar', '--']), /command after --/)
+})
+
+test('a negative chat id is still a chat id, not a command to run', () => {
+  const r = route(['config', 'chat', '-100123'])
+  assert.equal(r.command, 'config')
+  assert.deepEqual(r.args, ['chat', '-100123'])
+  assert.equal(r.childArgv, null)
+})
+
+test('a subcommand that cannot take a command is refused by name', () => {
+  assert.throws(() => route(['verify', 'telstore-1', '--', 'tar', 'x']), /verify/)
+})
