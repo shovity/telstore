@@ -15,7 +15,7 @@ const SUBCOMMANDS = new Set([
   'help',
 ])
 
-const OPTIONS = {
+export const OPTIONS = {
   chat: { type: 'string' },
   'chunk-size': { type: 'string' },
   'upload-concurrency': { type: 'string' },

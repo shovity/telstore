@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { HELP, route, interruptMessage } from '../src/cli.js'
+import { HELP, OPTIONS, route, interruptMessage } from '../src/cli.js'
 
 test('a first argument that is not a subcommand is treated as a file to upload', () => {
   const r = route(['data.tar'])
@@ -337,11 +337,33 @@ test('down is a subcommand, not a file to upload', () => {
 })
 
 // A flag the parser accepts and the help never mentions is a feature only its author knows
-// about. This is the one test that notices when the two drift apart.
+// about. This is the one test that notices when the two drift apart — so it reads the parser's
+// own table rather than a copy of it. The copy had gone stale and could not say so: it still
+// listed `to` long after `--to` was removed, and passed anyway, because `HELP.includes('--to')`
+// is satisfied by the `--token` two lines further down. A substring is not a mention, hence the
+// word boundary; a hand-kept list is not the parser, hence Object.keys.
 test('every flag the parser accepts is named in the help', () => {
-  for (const flag of ['to', 'chunk-size', 'upload-concurrency', 'download-concurrency', 'out',
-    'note', 'limit', 'search', 'verbose', 'unset', 'yes', 'token', 'help']) {
-    assert.ok(HELP.includes(`--${flag}`), `--${flag} is missing from the help`)
+  const flags = Object.keys(OPTIONS)
+
+  assert.ok(flags.length > 0)
+
+  for (const flag of flags) {
+    assert.match(HELP, new RegExp(`--${flag}\\b`), `--${flag} is missing from the help`)
+  }
+})
+
+// The other direction, which nothing checked at all: a flag the help promises and the parser
+// refuses sends someone to a command that dies with "Unknown option". Only the flags the help
+// sets out as its own count — `--chat @elsewhere` inside a sentence is prose, not a promise.
+test('every flag the help sets out is one the parser accepts', () => {
+  const promised = new Set(
+    [...HELP.matchAll(/^ {2}(?:-\w, )?--([a-z-]+)/gm)].map((match) => match[1]),
+  )
+
+  assert.ok(promised.size > 0)
+
+  for (const flag of promised) {
+    assert.ok(flag in OPTIONS, `--${flag} is in the help and not in the parser`)
   }
 })
 
