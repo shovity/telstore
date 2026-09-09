@@ -1,3 +1,22 @@
+// `handle.write(buffer)` is not guaranteed to write the whole buffer in one call. `bytes`
+// becomes the chunk's recorded length, so trusting an unchecked write would let telstore
+// claim more reached disk than actually did — silently wrong data, the one thing this
+// project refuses to produce. Loops until every byte of `buffer` has landed, or throws if
+// a write reports zero bytes written (which would otherwise spin forever rather than fail).
+async function writeFully(handle, buffer) {
+  let written = 0
+
+  while (written < buffer.length) {
+    const { bytesWritten } = await handle.write(buffer.subarray(written))
+
+    if (bytesWritten === 0) {
+      throw new Error('write wrote 0 bytes; refusing to spin retrying it')
+    }
+
+    written += bytesWritten
+  }
+}
+
 // One reader over the life of an upload: it holds the iterator, so the bytes a chunk did
 // not want are the first bytes of the next chunk rather than something dropped between
 // two reads. Pulling through an async iterator is also what gives backpressure for free —
@@ -50,7 +69,7 @@ export class ChunkReader {
       const room = limit - bytes
       const take = this.pending.length <= room ? this.pending : this.pending.subarray(0, room)
 
-      await handle.write(take)
+      await writeFully(handle, take)
       bytes += take.length
 
       this.pending =

@@ -102,3 +102,87 @@ test('an error from the stream is not turned into a clean eof by a later fill', 
   await assert.rejects(() => reader.fill(second, 100), /producer exploded/)
   await second.close()
 })
+
+// A plain hand-rolled async iterable, not a `Readable`: `Readable.from` does its own
+// one-step internal readahead when wrapping an async generator, which would make a pull
+// count taken through a real stream meaningless here. `ChunkReader` only ever asks its
+// source for `[Symbol.asyncIterator]()`, so this is a faithful source, not a workaround.
+function countingSource(pieces) {
+  const state = { pulls: 0 }
+  const source = {
+    [Symbol.asyncIterator]() {
+      let i = 0
+      return {
+        async next() {
+          if (i >= pieces.length) return { value: undefined, done: true }
+          state.pulls += 1
+          const value = pieces[i]
+          i += 1
+          return { value, done: false }
+        },
+      }
+    },
+  }
+  return { source, state }
+}
+
+// Backpressure is the entire reason this module pulls through an async iterator instead
+// of buffering ahead: while a chunk uploads for minutes, nothing must be pulled from the
+// source. A ChunkReader that prefetched one piece ahead "to be ready" would still pass
+// every test above this one, since none of them look at how many times the source was
+// actually asked for its next piece.
+test('does not pull from the source ahead of what the current fill needs', async () => {
+  const dir = await tempDir('stream')
+  const file = path.join(dir, 'chunk')
+  const { source, state } = countingSource([Buffer.from('abcde'), Buffer.from('fghij')])
+  const reader = new ChunkReader(source)
+
+  let handle = await fs.open(file, 'w')
+  const first = await reader.fill(handle, 3)
+  await handle.close()
+
+  assert.deepEqual(first, { bytes: 3, eof: false })
+  assert.equal(state.pulls, 1, 'filling less than one piece must pull exactly that piece')
+
+  handle = await fs.open(file, 'w')
+  const second = await reader.fill(handle, 2)
+  await handle.close()
+
+  assert.deepEqual(second, { bytes: 2, eof: false })
+  assert.equal(state.pulls, 1, 'a fill satisfied entirely from the pending remainder must not pull again')
+
+  handle = await fs.open(file, 'w')
+  const third = await reader.fill(handle, 5)
+  await handle.close()
+
+  assert.deepEqual(third, { bytes: 5, eof: false })
+  assert.equal(state.pulls, 2, 'once the remainder is exhausted, the next fill pulls exactly one more piece')
+})
+
+// A fake FileHandle whose write() only ever accepts `maxPerCall` bytes, the way a real
+// write(2) is allowed to behave. Records every call it actually received.
+function shortWriteHandle(maxPerCall) {
+  const calls = []
+  return {
+    calls,
+    async write(buffer) {
+      const take = buffer.subarray(0, Math.min(maxPerCall, buffer.length))
+      calls.push(Buffer.from(take))
+      return { bytesWritten: take.length }
+    },
+  }
+}
+
+// `fill` must not trust that one `handle.write(buffer)` call landed the whole buffer —
+// `bytes` becomes the chunk's recorded length, so a believed-but-untrue write would let
+// telstore claim more reached disk than actually did.
+test('a short write from the handle is retried until the whole buffer lands', async () => {
+  const reader = new ChunkReader(Readable.from([Buffer.from('abcdefghij')]))
+  const handle = shortWriteHandle(3)
+
+  const result = await reader.fill(handle, 100)
+
+  assert.deepEqual(result, { bytes: 10, eof: true })
+  assert.equal(Buffer.concat(handle.calls).toString(), 'abcdefghij')
+  assert.ok(handle.calls.length > 1, 'a handle limited to 3 bytes per call must be called more than once')
+})
