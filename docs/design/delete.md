@@ -141,6 +141,40 @@ that the user did not ask for, nothing reported gone that is still there.
   which is the whole reason the cost is affordable: it is paid to be able to say "Done", and
   where it runs out the word is not said. Anyone here to make `delete` faster by dropping a
   floor is trading that sentence away, and should read the floor bullet above before doing it.
+
+  **What that costs in seconds, measured 2026-09-09 in the throwaway e2e channel.** Four
+  identical three-chunk backups were put in one chat at four depths, by uploading a hundred
+  foreign documents between each; every one of them was then deleted through the real
+  `runDelete` with the confirmation answered "no", three rounds, the four depths interleaved so
+  a slow minute could not land on one of them alone.
+
+  | documents the walk read | walk alone | whole command, in-process |
+  | --- | --- | --- |
+  | 16 | 103 / 116 / 124 ms | ~2.2 s |
+  | 120 | 321 / 371 / 387 ms | ~2.3 s |
+  | 224 | 568 / 596 / 696 ms | ~3.0 s |
+  | 328 | 792 / 800 / 813 ms | ~2.9 s |
+
+  So roughly **2.4 ms a document, or 230 ms a hundred-document page**, on top of a fixed ~2 s
+  that is the connection and the manifest download and not the walk at all. End to end as a
+  user sees it — `node bin/telstore.js delete … --yes` timed from the shell, deepest first —
+  the same four cost 4.5 s, 3.8 s, 3.6 s and 3.2 s: **1.3 s of extra wall clock for 312 extra
+  documents**. Carried to the ceiling, `MAX_DELETE_DOCUMENTS` of 20000 is about **50 seconds**
+  of reading, which is the price of the one ending that does not say "Done".
+
+  The floors were measured separately, in the same chat and the same minutes, by asking
+  `delete` about ids nothing in the chat matched: an id dated two days ahead read **1** document
+  and stopped, an id dated eight days back read all **329** and stopped only because the chat
+  ran out. Same command, same chat, three repeats each, only the day inside the id different —
+  which is the date floor doing exactly what the bullet above says it does, and the clearest
+  demonstration that the cost is a property of the chat's traffic and not of the backup.
+
+  One thing that measurement could **not** see, and it is the thing that decides the cost in
+  practice: no document in that chat was older than the date floor, so every walk ran to the
+  bottom of the chat rather than stopping at a floor. A chat younger than the backup's day plus
+  a day of slack is read whole, every time, by every `delete`. In a chat with years behind it
+  the second term is a day or two of that chat's own traffic instead — untested here, and the
+  number that would matter is documents per day, not documents in total.
 - **A batch does not walk for an id that neither the search nor a record knows.** `runDeletes`
   asks about every id at once and before anything is destroyed, so a walk apiece would turn one
   mistyped id in a list of five into minutes spent reading somebody's archive. It refuses as it
@@ -162,8 +196,30 @@ that the user did not ask for, nothing reported gone that is still there.
 - **What none of this can see.** The fake client cannot produce the race that motivated it —
   that is the whole finding — so the tests prove the walk finds a chunk the record does not
   name, that the wording is honest, and that a delete with nothing stray behaves as it did
-  before, and nothing more. Against a real account this has not been run: the next e2e should
-  repeat the second-Ctrl-C stream upload and check that the printed `delete` now empties the
-  chat in all three runs rather than two. What remains uncovered is what neither floor bounds:
-  a chat where the walk reaches `MAX_DELETE_DOCUMENTS`, which is the one ending that does not
-  claim to be complete and says so instead.
+  before, and nothing more.
+
+  Against a real account it has now been run, 2026-09-09, and the check it was waiting for is
+  the second-Ctrl-C stream upload repeated three times: **the race reproduced at the same rate
+  as before the fix — two of three runs left a chunk the record did not name — and in both of
+  them the printed `npx telstore delete <id> --chat <chat>` found the extra chunk by reading
+  the chat, counted it in the question it asked, removed all three, and left the chat empty by
+  a walk repeated three times.** Before the fix that same line removed two, said "Done", and
+  left 12MB standing. The wording held as written: `Also 1 chunk message of this backup that no
+  manifest and no record on this machine names, found by reading <chat>`, said once above the
+  question and once in the report.
+
+  The card the walk meets was exercised too, and only halfway honestly: the condition it exists
+  for — a text index that will not answer for documents that are plainly there — could not be
+  produced on the server that day. The index answered a fresh manifest in 0.2 s, and taking the
+  backup id out of the card's caption by hand did not hide it either, because Telegram indexes
+  the file name as well (`docs/design/captions.md` measured that first; a token that existed
+  only in a file name was found three times out of three). So `searchManifest` was made to
+  return `null` at the deps seam and everything under it left real: the walk met the card,
+  teleproto's `downloadMedia` accepted the `Api.Message` it was handed, the manifest parsed,
+  and the delete removed three chunks and the card. That is the path that shipped broken and
+  no fake noticed — it works against the real client now, under a condition that was simulated
+  rather than caused.
+
+  What remains uncovered is what neither floor bounds: a chat where the walk reaches
+  `MAX_DELETE_DOCUMENTS`, which is the one ending that does not claim to be complete and says
+  so instead.

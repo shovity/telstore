@@ -101,6 +101,22 @@
   of the same shape against a rollback Telegram itself refuses, which cannot be arranged
   against a real account without faking the client.
 
+  **Repeated later the same day against the fixed `delete`, and the race is unchanged: two of
+  three runs again left a chunk the record did not name.** The leak was never the thing that
+  was fixed — `sent.push` still cannot close that window from outside the process — so the
+  right reading of this entry is that the trail is one short *and that is now survivable*,
+  because `delete` reads the chat instead of trusting the record (`docs/design/delete.md`). The
+  printed command removed all three chunks in both leaking runs and left the chat empty by a
+  walk repeated three times. Anyone tempted to close the window at the source should still do
+  it; nothing above stops being true.
+
+  **What the second Ctrl-C also strands, and nobody is told about: the chunk being buffered.**
+  `discard` never runs on the "leave now" path, so each of the three runs left a full
+  `~/.telstore/tmp/<id>-N.chunk` behind — 12MB apiece, 37MB after three. The printed `delete`
+  removes the chat side and drops the record, `status` then says "Unfinished none", and the
+  file stays. It is the same leak a `SIGKILL` leaves, on a path telstore prints instructions
+  for, and `down` is still the only thing that removes it.
+
 - `verify` exists because nothing else answers "is this backup still restorable" without
   downloading it. It asks the chat about every chunk message the manifest names — still
   there, still a document, still the file name telstore wrote, still the length recorded —
