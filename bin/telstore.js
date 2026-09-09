@@ -65,6 +65,13 @@ async function main() {
       return
     }
 
+    case 'down': {
+      const { runDown } = await import('../src/commands/down.js')
+
+      await runDown(parsed.args, parsed.options)
+      return
+    }
+
     case 'list': {
       const { runList } = await import('../src/commands/list.js')
 

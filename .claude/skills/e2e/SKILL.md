@@ -34,8 +34,9 @@ chat.** This runs `delete --yes`, and a scoping mistake there destroys real back
 project keeps a throwaway channel for exactly this; its id is not in the repo. If there isn't
 one, create one (`Api.channels.CreateChannel`, `broadcast: true`).
 
-**Isolate `HOME` before running a single command.** `logout` and `config` write, and a run
-against the real `~/.telstore` destroys the session of whoever is running this. `os.homedir()`
+**Isolate `HOME` before running a single command.** `logout`, `config` and `down` write, and
+a run against the real `~/.telstore` destroys the session of whoever is running this — `down`
+removes the whole directory. `os.homedir()`
 follows `$HOME`, so one prefix isolates everything:
 
 ```js

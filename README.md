@@ -34,6 +34,7 @@ npx telstore restore telstore-20260905-7f3a91
 | `telstore config` | Show or change settings. |
 | `telstore token` | Print a session token for a machine you do not trust. |
 | `telstore logout` | Remove the locally stored session. |
+| `telstore down` | Remove everything telstore keeps on this machine: session, credentials, settings and resume records. Asks once. Deletes nothing from Telegram. |
 
 ## Settings
 
@@ -219,6 +220,13 @@ Settings and credentials live in `~/.telstore/config.json`, mode 600 — `apiId`
 the session at the top level (or a single `sealed` blob after `login --token`), everything
 `config` manages under `settings`. Editing it by hand is fine: a value that cannot be used is
 named on the next run, with the file and the key.
+
+`npx telstore down` removes all of that, and `~/.telstore/state/` with it — everything on
+this machine, in one question. It opens no connection: your backups stay in the chat, and
+the session stays alive on Telegram's side until you terminate it under Settings → Devices.
+Unlike `logout` it takes the `api_id` and `api_hash` too, so the next `login` asks for them
+again. A half-finished restore's `.partial` is left where it is and named on the way out —
+it still resumes, and after this nothing else will remind you it is there.
 
 ## License
 

@@ -211,6 +211,47 @@ test('--help mentions verify', async () => {
   assert.match(stdout, /npx telstore verify/)
 })
 
+test('--help mentions down', async () => {
+  const { stdout } = await runCli(['--help'])
+  assert.match(stdout, /npx telstore down/)
+})
+
+// Every unit test injects a configDir, which is the one thing production never does: there
+// the path comes from os.homedir(). This is the only test that proves down removes the
+// directory the binary actually picks — under a HOME of its own, because the alternative is
+// deleting the session of whoever runs the suite.
+test('down removes the config directory the binary picks for itself', async () => {
+  const home = await tempDir('down-home')
+  const configDir = path.join(home, '.telstore')
+
+  await fs.mkdir(path.join(configDir, 'state'), { recursive: true })
+  await fs.writeFile(
+    path.join(configDir, 'config.json'),
+    JSON.stringify({ session: 's', apiId: 1, apiHash: 'h', settings: { chat: 'me' } }),
+  )
+
+  const { stdout } = await run(process.execPath, [BIN, 'down', '--yes'], {
+    env: { ...process.env, HOME: home },
+  })
+
+  assert.match(stdout, /Done\. Removed /)
+  await assert.rejects(fs.stat(configDir), { code: 'ENOENT' })
+})
+
+// A machine that never ran telstore, and a typo that would have wiped one that did.
+test('down says there is nothing to remove, and refuses a backup id', async () => {
+  const home = await tempDir('down-empty-home')
+
+  const { stdout } = await run(process.execPath, [BIN, 'down'], {
+    env: { ...process.env, HOME: home },
+  })
+  assert.match(stdout, /Nothing to remove/)
+
+  const { code, stderr } = await runCli(['down', 'telstore-20260905-7f3a91'])
+  assert.equal(code, 1)
+  assert.match(stderr, /npx telstore delete/)
+})
+
 // --- a machine that logged in with a session token ---
 
 import { encodeToken } from '../src/token.js'
@@ -312,6 +353,15 @@ async function teleprotoScriptsLoadedBy(args, env = {}) {
 
 test('the offline commands do not load teleproto at all', async () => {
   assert.equal(await teleprotoScriptsLoadedBy(['--help']), 0)
+})
+
+// down is the command most likely to be run on a machine with no network at all, and the one
+// whose whole job is a path derived from os.homedir(). One import of status.js — the obvious
+// place to borrow a resume line from — would put teleproto back in its path unnoticed.
+test('down opens nothing, on a machine with nothing to remove', async () => {
+  const home = await tempDir('down-offline')
+
+  assert.equal(await teleprotoScriptsLoadedBy(['down'], { HOME: home }), 0)
 })
 
 test('token refuses a config that is not logged in without loading teleproto', async () => {

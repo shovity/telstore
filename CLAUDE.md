@@ -58,6 +58,7 @@ anything that row names** — not afterwards, and not only when something looks 
 | `src/stall.js`, `src/retry.js`, anything that waits on the network | `docs/design/stalls-and-retries.md` |
 | `src/token.js`, `src/session.js`, `src/commands/login.js`, `src/commands/token.js` | `docs/design/session-tokens.md` |
 | `src/commands/delete.js`, the delete path in `src/client.js` | `docs/design/delete.md` |
+| `src/commands/down.js`, `src/commands/logout.js` | `docs/design/down.md` |
 | `src/sources.js`, `runUploads` / `runRestores` / `runDeletes` / `runVerifies`, batch confirmation | `docs/design/batches.md` |
 | `src/settings.js`, `src/cli.js`, `src/commands/config.js`, any flag | `docs/design/settings-and-flags.md` |
 | `src/caption.js`, `src/commands/list.js`, anything the chat shows | `docs/design/captions.md` |

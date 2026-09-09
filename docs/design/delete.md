@@ -1,7 +1,8 @@
 # `delete`
 
-The one command that destroys data on purpose, so the rule runs the other way: nothing
-removed that the user did not ask for, nothing reported gone that is still there.
+The command that destroys data on Telegram on purpose — `down` is the one that destroys it
+on this machine (`docs/design/down.md`) — so the rule runs the other way: nothing removed
+that the user did not ask for, nothing reported gone that is still there.
 
 - Chunks first, manifest last, local record last of all — the manifest is the only list of
   message ids, so removing it first strands every remaining chunk unnamed. Leaving it until

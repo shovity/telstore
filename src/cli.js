@@ -4,6 +4,7 @@ import { parseArgs } from 'node:util'
 const SUBCOMMANDS = new Set([
   'login',
   'logout',
+  'down',
   'list',
   'restore',
   'verify',
@@ -43,6 +44,7 @@ Usage:
   npx telstore status                     Show the account, the destination and unfinished uploads and restores
   npx telstore config                     Show every setting and where its value comes from
   npx telstore logout                     Remove the saved session
+  npx telstore down                       Remove everything telstore keeps on this machine
 
 Running on a machine you do not trust:
   npx telstore token                      Print a session token for another machine
@@ -53,6 +55,11 @@ backup. A folder means the files one level inside it, and a pattern means the na
 — the shell usually expands those itself, so quote one to hand it to telstore intact. More than
 one file is listed and confirmed before the first byte goes out. Run telstore again with only
 the files that are left to carry on after an interruption.
+
+down is logout taken all the way: it removes ~/.telstore entirely — the session, the api_id
+and api_hash, every setting and every resume record — and asks once before it does. It opens
+no connection and deletes nothing from Telegram: the backups stay in the chat, and the session
+stays alive on Telegram's side until you terminate it under Settings → Devices.
 
 restore, verify and delete take several ids the same way: one connection, one line each, and
 an exit code that reports any that failed. delete shows everything it is about to destroy and
@@ -96,7 +103,8 @@ Options apply to one run and are never saved. Use config to change a setting for
                               purpose: a token written on the command line would sit in
                               "ps" for the whole life of the command, and stay in that
                               machine's shell history afterwards.
-  --yes                       Upload a batch, or delete, without being asked to confirm.
+  --yes                       Upload a batch, delete, or wipe this machine with down,
+                              without being asked to confirm.
   --verbose                   Show Telegram connection logs for this run.
   -h, --help                  Show this help.
 `

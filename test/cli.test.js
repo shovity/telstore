@@ -326,6 +326,16 @@ test('an unquoted note leaves its remaining words as positionals', () => {
   assert.deepEqual(r.args, ['a.tar', 'accounts'])
 })
 
+// A file called `down` in the working directory is no longer uploadable as `telstore down`
+// — the same trade `list`, `status` and `token` already made — but the argument after it must
+// still arrive as an argument, so runDown can refuse it by name rather than wiping the machine.
+test('down is a subcommand, not a file to upload', () => {
+  assert.equal(route(['down']).command, 'down')
+  assert.deepEqual(route(['down']).args, [])
+  assert.deepEqual(route(['down', 'telstore-20260905-7f3a91']).args, ['telstore-20260905-7f3a91'])
+  assert.equal(route(['down', '--yes']).options.yes, true)
+})
+
 // A flag the parser accepts and the help never mentions is a feature only its author knows
 // about. This is the one test that notices when the two drift apart.
 test('every flag the parser accepts is named in the help', () => {
