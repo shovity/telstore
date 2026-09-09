@@ -4,7 +4,12 @@ import { promises as fs } from 'node:fs'
 
 import { runDelete } from '../src/commands/delete.js'
 import { saveConfig } from '../src/config.js'
-import { buildManifest, manifestFileName, serializeManifest } from '../src/manifest.js'
+import {
+  buildManifest,
+  chunkFileName,
+  manifestFileName,
+  serializeManifest,
+} from '../src/manifest.js'
 import { findRestores, restoreKey, saveRestore, saveState, stateDir } from '../src/state.js'
 import { LOGGED_IN, collect, tempDir } from './helpers.js'
 
@@ -66,6 +71,11 @@ function deps(configDir, { manifest = null, manifestMsgId = 2000, out, rec, ...e
     retryOptions: { attempts: 1 },
     searchManifest: async () =>
       bytes === null ? null : { id: manifestMsgId, fileName: manifestFileName(ID) },
+    // An empty chat unless a test says otherwise. Every assertion below about what delete
+    // removes is about what the manifest and the record name, and a walk that finds nothing
+    // is what leaves those alone.
+    readDocuments: async function* () {},
+    writeProgress: null,
     readMessageBytes: async () => bytes,
     deleteMessages: rec?.deleteMessages ?? (async () => 0),
     ...extra,
@@ -590,4 +600,474 @@ test('a restore record whose .partial is already gone is dropped without a word 
 
   assert.deepEqual(await findRestores(ID, configDir), [])
   assert.doesNotMatch(out.text(), /\.partial/)
+})
+
+// --- what the chat itself says is there ---------------------------------------------------
+//
+// Measured 2026-09-09 against a real account: a stream upload left by a second Ctrl-C put a
+// chunk in the chat that its own record never named, and the delete command that run printed
+// removed the two ids it knew about, said "Done", and left 12MB behind
+// (docs/design/data-integrity.md, and the reasoning in docs/design/delete.md). No fake client
+// can produce that race — what it can do is prove delete no longer takes the record's word
+// for what is in the chat.
+
+// The day every document below is stamped with: after the day ID carries, so nothing here
+// stops the walk by being older than the backup itself.
+const DAY = Date.UTC(2026, 8, 6) / 1000
+
+const chunkDoc = (msgId, index, backup = ID) => ({
+  id: msgId,
+  fileName: chunkFileName(backup, index),
+  date: DAY,
+})
+
+const cardDoc = (msgId, backup = ID) => ({
+  id: msgId,
+  fileName: manifestFileName(backup),
+  date: DAY,
+})
+
+const otherDoc = (msgId, fileName, date = DAY) => ({ id: msgId, fileName, date })
+
+// A chat as iterDocuments hands it over — newest first, and honouring the offsetId and the
+// ceiling the caller asked for. Each call is kept, with how many documents the walk actually
+// pulled out of it: where the walk stops is the whole point of several tests below, and a
+// walk that read the entire chat to reach the same answer would pass every other assertion.
+function chatOf(documents) {
+  const newestFirst = [...documents].sort((a, b) => b.id - a.id)
+  const walks = []
+
+  return {
+    walks,
+    readDocuments: async function* (client, peer, options = {}) {
+      const { max = Infinity, offsetId = 0 } = options
+      const walk = { offsetId, max, read: 0 }
+
+      walks.push(walk)
+
+      for (const document of newestFirst) {
+        if (offsetId !== 0 && document.id >= offsetId) continue
+        if (walk.read >= max) return
+
+        walk.read += 1
+        yield document
+      }
+    },
+  }
+}
+
+test('a chunk in the chat that the record never named is removed with the rest', async () => {
+  const configDir = await workspace()
+  const rec = recorder()
+  // What the e2e run measured: the record names two, the chat holds three.
+  const chat = chatOf([chunkDoc(500, 0), chunkDoc(501, 1), chunkDoc(502, 2)])
+
+  await unfinishedStream(configDir, {
+    done: { 0: { msgId: 500, size: 4, sha256: 'x' }, 1: { msgId: 501, size: 4, sha256: 'x' } },
+  })
+
+  await runDelete(ID, {}, deps(configDir, { rec, readDocuments: chat.readDocuments }))
+
+  assert.deepEqual(rec.ids(), [500, 501, 502])
+})
+
+test('the stray chunk is named before the question that authorises the removal', async () => {
+  const configDir = await workspace()
+  const out = collect()
+  const chat = chatOf([chunkDoc(500, 0), chunkDoc(501, 1)])
+  let askedAfter = null
+
+  await unfinishedStream(configDir)
+
+  await runDelete(
+    ID,
+    {},
+    deps(configDir, {
+      rec: recorder(),
+      out,
+      readDocuments: chat.readDocuments,
+      confirm: async () => {
+        askedAfter = out.text()
+        return true
+      },
+    }),
+  )
+
+  assert.match(askedAfter, /1 chunk message of this backup that no manifest and no record/)
+  assert.match(askedAfter, /found by reading @store/)
+  // And again at the end, where somebody reads what actually happened.
+  assert.match(out.text(), /That includes 1 chunk message of this backup/)
+})
+
+// The count in that question is the number a person is agreeing to destroy, so the chunk the
+// walk found has to be inside it rather than a footnote beside it.
+test('the question counts the stray chunk among the messages it is about to remove', async () => {
+  const configDir = await workspace()
+  const chat = chatOf([chunkDoc(500, 0), chunkDoc(501, 1)])
+  let question = null
+
+  await unfinishedStream(configDir)
+
+  await runDelete(
+    ID,
+    {},
+    deps(configDir, {
+      rec: recorder(),
+      readDocuments: chat.readDocuments,
+      confirm: async (text) => {
+        question = text
+        return true
+      },
+    }),
+  )
+
+  assert.match(question, /Delete the 2 chunk messages it sent/)
+})
+
+test('a delete with nothing stray in the chat says nothing new about it', async () => {
+  const configDir = await workspace()
+  const out = collect()
+  const chat = chatOf([chunkDoc(1000, 0), chunkDoc(1001, 1), chunkDoc(1002, 2), cardDoc(2000)])
+  const rec = recorder()
+
+  await runDelete(
+    ID,
+    { yes: true },
+    deps(configDir, { manifest: manifestBody(), rec, out, readDocuments: chat.readDocuments }),
+  )
+
+  assert.deepEqual(rec.calls, [[1000, 1001, 1002], [2000]])
+  assert.doesNotMatch(out.text(), /found by reading/)
+  assert.match(out.text(), /^\nDone\. Removed/m)
+})
+
+// The walk is bounded by the backup's own messages: telstore sends chunk 0 first and records
+// each id as it lands, so the oldest id it knows is the oldest message this backup has in the
+// chat and there is nothing of it below. A walk without that floor reads somebody's whole
+// archive to find a chunk that was three messages from the top.
+test('the walk stops at the oldest message the backup is known to have sent', async () => {
+  const configDir = await workspace()
+  const chat = chatOf([
+    chunkDoc(500, 0),
+    chunkDoc(501, 1),
+    chunkDoc(502, 2),
+    ...Array.from({ length: 50 }, (_, i) => otherDoc(400 - i, `somebody-else-${i}.zip`)),
+  ])
+
+  await unfinishedStream(configDir, {
+    done: { 0: { msgId: 500, size: 4, sha256: 'x' }, 1: { msgId: 501, size: 4, sha256: 'x' } },
+  })
+
+  await runDelete(ID, {}, deps(configDir, { rec: recorder(), readDocuments: chat.readDocuments }))
+
+  assert.equal(chat.walks.length, 1)
+  assert.equal(chat.walks[0].read, 3)
+})
+
+// A backup's manifest is the last message its run sends, so nothing of that backup is newer
+// than the card. Everything posted since belongs to somebody else, and reading it costs a
+// request per hundred documents on every delete of an old backup.
+test('the walk starts under the card when the chat search found one', async () => {
+  const configDir = await workspace()
+  const chat = chatOf([
+    ...Array.from({ length: 30 }, (_, i) => otherDoc(9000 - i, `newer-${i}.zip`)),
+    cardDoc(2000),
+    chunkDoc(1000, 0),
+    chunkDoc(1001, 1),
+    chunkDoc(1002, 2),
+  ])
+
+  await runDelete(
+    ID,
+    { yes: true },
+    deps(configDir, { manifest: manifestBody(), rec: recorder(), readDocuments: chat.readDocuments }),
+  )
+
+  assert.equal(chat.walks[0].offsetId, 2000)
+  assert.equal(chat.walks[0].read, 3)
+})
+
+// The one mistake in this command nothing can undo is removing somebody else's message, so
+// what belongs to this backup is decided by the file name telstore wrote and by nothing else.
+test('the walk leaves alone what is not this backup\'s chunk', async () => {
+  const configDir = await workspace()
+  const rec = recorder()
+  const chat = chatOf([
+    chunkDoc(600, 0, 'telstore-20260905-000000'),
+    otherDoc(601, `${ID}.partial`),
+    otherDoc(602, `${ID}.part0001.bak`),
+    otherDoc(603, 'holiday.zip'),
+    chunkDoc(604, 3),
+    chunkDoc(500, 0),
+  ])
+
+  await unfinishedStream(configDir)
+
+  await runDelete(ID, {}, deps(configDir, { rec, readDocuments: chat.readDocuments }))
+
+  assert.deepEqual(rec.ids(), [500, 604])
+})
+
+// The chunks go first and the manifest last so an interrupted delete can be finished by
+// running it again. A chunk the walk found is a chunk like any other and keeps that order.
+test('a stray chunk goes out with the chunks, not after the manifest', async () => {
+  const configDir = await workspace()
+  const rec = recorder()
+  const chat = chatOf([cardDoc(2000), chunkDoc(1500, 3), chunkDoc(1000, 0)])
+
+  await runDelete(
+    ID,
+    { yes: true },
+    deps(configDir, { manifest: manifestBody(), rec, readDocuments: chat.readDocuments }),
+  )
+
+  assert.deepEqual(rec.calls, [[1000, 1001, 1002, 1500], [2000]])
+})
+
+// Telegram's text index can answer nothing at all about a chat that is plainly full of
+// documents (docs/design/captions.md). Before the walk, a delete that hit that took the
+// chunks away and left the card advertising a backup restore cannot fulfil.
+test('a manifest the search missed is found by the walk and removed last', async () => {
+  const configDir = await workspace()
+  const rec = recorder()
+  const chat = chatOf([cardDoc(2000), chunkDoc(1002, 2), chunkDoc(1001, 1), chunkDoc(1000, 0)])
+
+  await unfinished(configDir, { done: { 0: { msgId: 1000, size: 400, sha256: 'x' } } })
+
+  await runDelete(
+    ID,
+    {},
+    deps(configDir, {
+      rec,
+      readDocuments: chat.readDocuments,
+      searchManifest: async () => null,
+      readMessageBytes: async () => serializeManifest(manifestBody()),
+    }),
+  )
+
+  assert.deepEqual(rec.calls, [[1000, 1001, 1002], [2000]])
+})
+
+// Those three chunks are named by the card the walk found on its way past, so none of them is
+// a message nothing points at. Counting them before that card had been read would report a
+// whole backup as leftovers in the sentence someone reads to decide whether to say yes.
+test('chunks named by the manifest the walk found are not called strays', async () => {
+  const configDir = await workspace()
+  const out = collect()
+  const chat = chatOf([cardDoc(2000), chunkDoc(1002, 2), chunkDoc(1001, 1), chunkDoc(1000, 0)])
+
+  await unfinished(configDir, { done: { 0: { msgId: 1000, size: 400, sha256: 'x' } } })
+
+  await runDelete(
+    ID,
+    { yes: true },
+    deps(configDir, {
+      rec: recorder(),
+      out,
+      readDocuments: chat.readDocuments,
+      searchManifest: async () => null,
+      readMessageBytes: async () => serializeManifest(manifestBody()),
+    }),
+  )
+
+  assert.doesNotMatch(out.text(), /found by reading/)
+})
+
+// Nothing on this machine names these — the record was cleared, or the id was only ever read
+// off the line the interrupted run printed. Before the walk this refused outright.
+test('chunks in the chat are removed even with no manifest and no record', async () => {
+  const configDir = await workspace()
+  const rec = recorder()
+  const out = collect()
+  const chat = chatOf([chunkDoc(501, 1), chunkDoc(500, 0), otherDoc(499, 'holiday.zip')])
+
+  let question = null
+
+  const result = await runDelete(
+    ID,
+    {},
+    deps(configDir, {
+      rec,
+      out,
+      readDocuments: chat.readDocuments,
+      confirm: async (text) => {
+        question = text
+        return true
+      },
+    }),
+  )
+
+  assert.deepEqual(rec.ids(), [500, 501])
+  assert.equal(result.stateCleared, false)
+  assert.match(out.text(), /Done\. Removed 2 chunk messages of telstore-20260905-7f3a91/)
+  // There is no record here to offer to drop, and a question that says otherwise is one
+  // whose "yes" means something other than what it asked.
+  assert.doesNotMatch(question, /local record/)
+  assert.match(question, /Delete the 2 chunk messages it sent\?/)
+})
+
+// The floor for a walk that knows no message id of its own is the day the backup id carries,
+// with a day of slack under it: nothing that backup sent can be older than the day it was
+// made, whatever else is in the chat below.
+test('a walk with no id to stop at stops at the day the backup id carries', async () => {
+  const configDir = await workspace()
+  const chat = chatOf([
+    chunkDoc(500, 0),
+    otherDoc(499, 'older.zip', Date.UTC(2026, 8, 3) / 1000),
+    ...Array.from({ length: 40 }, (_, i) => otherDoc(400 - i, `ancient-${i}.zip`, 0)),
+  ])
+
+  await runDelete(ID, { yes: true }, deps(configDir, { rec: recorder(), readDocuments: chat.readDocuments }))
+
+  assert.equal(chat.walks[0].read, 2)
+})
+
+// A walk stopped by its own ceiling has not reached the start of the backup and cannot say
+// what is behind it. "Done" is a claim of exactly that, so it is not made.
+test('a walk stopped by its ceiling does not report the backup as done', async () => {
+  const configDir = await workspace()
+  const out = collect()
+  const rec = recorder()
+  const chat = chatOf([
+    chunkDoc(601, 4),
+    otherDoc(600, 'a.zip'),
+    otherDoc(599, 'b.zip'),
+    chunkDoc(500, 0),
+  ])
+
+  await unfinishedStream(configDir)
+
+  await runDelete(
+    ID,
+    { yes: true },
+    deps(configDir, { rec, out, readDocuments: chat.readDocuments, maxDocuments: 3 }),
+  )
+
+  assert.deepEqual(rec.ids(), [500, 601])
+  assert.doesNotMatch(out.text(), /Done\./)
+  assert.match(out.text(), /read the newest 3 documents of @store without reaching the start/)
+  assert.match(out.text(), /carries that id in its file name/)
+})
+
+test('a walk that reached the backup\'s own floor says the removal is done', async () => {
+  const configDir = await workspace()
+  const out = collect()
+  const chat = chatOf([chunkDoc(501, 1), chunkDoc(500, 0)])
+
+  await unfinishedStream(configDir)
+
+  await runDelete(
+    ID,
+    { yes: true },
+    deps(configDir, { rec: recorder(), out, readDocuments: chat.readDocuments }),
+  )
+
+  assert.match(out.text(), /Done\. Removed/)
+  assert.doesNotMatch(out.text(), /without reaching the start/)
+})
+
+test('an id nothing in the chat and nothing on disk knows about is still refused', async () => {
+  const configDir = await workspace()
+  const chat = chatOf([otherDoc(9000, 'holiday.zip')])
+
+  await assert.rejects(
+    () => runDelete(ID, {}, deps(configDir, { rec: recorder(), readDocuments: chat.readDocuments })),
+    /No backup telstore-20260905-7f3a91 found in @store, and no unfinished record/,
+  )
+})
+
+// "Not found" over a chat the walk could not read to the bottom of is a claim about
+// somewhere it never looked.
+test('an id not found by a walk that ran out of budget says how far it read', async () => {
+  const configDir = await workspace()
+  const chat = chatOf([otherDoc(9000, 'a.zip'), otherDoc(8999, 'b.zip'), otherDoc(8998, 'c.zip')])
+
+  await assert.rejects(
+    () =>
+      runDelete(
+        ID,
+        {},
+        deps(configDir, { rec: recorder(), readDocuments: chat.readDocuments, maxDocuments: 2 }),
+      ),
+    /the newest 2 documents were read/,
+  )
+})
+
+// Silence over a chat being read page by page is the hang this project refuses everywhere
+// else; a line drawn and wiped inside 400ms is a flicker rather than information.
+test('a walk long enough to look like a hang says what it is reading', async () => {
+  const configDir = await workspace()
+  const drawn = []
+  let clock = 1000
+
+  await unfinishedStream(configDir)
+
+  await runDelete(
+    ID,
+    { yes: true },
+    deps(configDir, {
+      rec: recorder(),
+      readDocuments: async function* () {
+        for (let i = 0; i < 200; i += 1) {
+          clock += 10
+          yield otherDoc(9000 - i, `filler-${i}.zip`)
+        }
+      },
+      writeProgress: (text) => drawn.push(text),
+      now: () => clock,
+    }),
+  )
+
+  assert.ok(drawn.length > 0, 'expected the walk to say something')
+  assert.ok(drawn.some((text) => /Reading @store/.test(text)))
+  assert.match(drawn.at(-1), /^\r +\r$/)
+})
+
+test('a walk short enough to go unnoticed draws nothing', async () => {
+  const configDir = await workspace()
+  const drawn = []
+  const chat = chatOf([chunkDoc(500, 0)])
+
+  await unfinishedStream(configDir)
+
+  await runDelete(
+    ID,
+    { yes: true },
+    deps(configDir, {
+      rec: recorder(),
+      readDocuments: chat.readDocuments,
+      writeProgress: (text) => drawn.push(text),
+      now: () => 1000,
+    }),
+  )
+
+  assert.deepEqual(drawn, [])
+})
+
+// The ceiling and the floor can land on the same document: a walk that reached the start of
+// the backup with its last permitted read has seen everything there is, and reporting that as
+// a removal it could not finish would send somebody looking for chunks that are not there.
+test('a walk that reaches the floor on its last permitted read is still complete', async () => {
+  const configDir = await workspace()
+  const out = collect()
+  const chat = chatOf([
+    chunkDoc(502, 2),
+    chunkDoc(501, 1),
+    chunkDoc(500, 0),
+    otherDoc(499, 'older.zip'),
+  ])
+
+  await unfinishedStream(configDir, {
+    done: { 0: { msgId: 500, size: 4, sha256: 'x' }, 1: { msgId: 501, size: 4, sha256: 'x' } },
+  })
+
+  await runDelete(
+    ID,
+    { yes: true },
+    deps(configDir, { rec: recorder(), out, readDocuments: chat.readDocuments, maxDocuments: 3 }),
+  )
+
+  assert.equal(chat.walks[0].read, 3)
+  assert.match(out.text(), /Done\. Removed/)
+  assert.doesNotMatch(out.text(), /without reaching the start/)
 })

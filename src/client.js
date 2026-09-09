@@ -76,9 +76,15 @@ async function* iterMessagePages(client, peer, { search, what, options }) {
     max = Infinity,
     retryOptions = {},
     stallMs = DEFAULT_STALL_MS,
+    // Where the walk begins, as the id of the message just above the first one wanted. 0 is
+    // "the newest in the chat", which is what list asks for. delete starts at a backup's own
+    // manifest instead when the chat has shown it one: the manifest is the last message a
+    // backup's run sends, so nothing of that backup is newer, and everything posted since is
+    // a page of documents read for nothing.
+    offsetId: startId = 0,
   } = options
 
-  let offsetId = 0
+  let offsetId = startId
   let read = 0
 
   while (read < max) {

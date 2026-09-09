@@ -150,7 +150,10 @@ differently — so a chunk left in the chat by a failed stream is a chunk no man
 name. Ctrl-C means the same thing here: telstore asks the run to remove what it sent and waits
 for it, rather than leaving where it stands. If the removal itself cannot finish, the record
 stays on this machine and the run prints the `npx telstore delete <id> --chat <chat>` that
-finishes it by hand.
+finishes it by hand. `delete` reads the chat for chunks carrying the backup id rather than
+taking that record's word for what is there, so a chunk that landed after the record stopped
+being written goes too — and when it cannot read far enough back to be sure, it says so
+instead of reporting the backup gone.
 
 There is no shell in between: the command is spawned as an argv, so nothing needs quoting and
 telstore never builds a command string out of your arguments. `-- sh -c '...'` is how a pipeline

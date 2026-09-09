@@ -481,3 +481,15 @@ test('iterManifestSearch stops at the ceiling it was given', async () => {
   assert.equal(seen.length, 250)
   assert.equal(client.calls.length, 3)
 })
+
+// delete starts its walk under a backup's own manifest when the chat has shown it one: the
+// manifest is the last message a run sends, so everything newer belongs to somebody else and
+// reading it costs a page per hundred documents for nothing.
+test('iterDocuments starts where it was told to rather than at the newest message', async () => {
+  const client = chatOfDocuments(250)
+
+  const seen = await collectDocuments(client, { pageSize: 100, offsetId: 200 })
+
+  assert.equal(seen[0], 199)
+  assert.equal(client.calls[0].offsetId, 200)
+})

@@ -11,8 +11,60 @@ export function newBackupId(now = new Date(), randomHex = () => randomBytes(3).t
   return `telstore-${yyyy}${mm}${dd}-${randomHex()}`
 }
 
+// The day a backup id carries, as the UTC second that day began. newBackupId stamps it above
+// from the clock of the machine making the backup, so it is that machine's idea of the day
+// rather than Telegram's — which is why the one reader of this (delete's walk of the chat)
+// gives it a day of slack and only ever uses it as a floor.
+//
+// A date that does not exist is not a day: `telstore-20269999-abc` would otherwise roll over
+// into a year's time and read as a floor above everything in the chat, which is an early stop
+// nobody would see. Null instead, and the caller falls back to a bound it can prove.
+const BACKUP_ID_DAY = /^telstore-(\d{4})(\d{2})(\d{2})-[0-9a-f]+$/
+
+export function backupIdDay(id) {
+  const match = BACKUP_ID_DAY.exec(String(id))
+
+  if (!match) return null
+
+  const [year, month, day] = match.slice(1).map(Number)
+  const at = new Date(Date.UTC(year, month - 1, day))
+
+  if (at.getUTCFullYear() !== year || at.getUTCMonth() !== month - 1 || at.getUTCDate() !== day) {
+    return null
+  }
+
+  return Math.floor(at.getTime() / 1000)
+}
+
+// The infix in every chunk's file name. A constant rather than a literal for the same reason
+// MANIFEST_SUFFIX is one: there are two readers of that name now — the writer below and
+// isChunkFileName — and a reader that disagrees with the writer by one character finds
+// nothing at all.
+const CHUNK_INFIX = '.part'
+
 export function chunkFileName(id, i) {
-  return `${id}.part${String(i + 1).padStart(4, '0')}`
+  return `${id}${CHUNK_INFIX}${String(i + 1).padStart(4, '0')}`
+}
+
+// Whether a document in a chat is a chunk of this backup, decided by the file name telstore
+// itself wrote and not by the caption beside it — the rule findManifestMessage already keeps,
+// for the same reason: a caption is text a person can edit and a file name is not.
+//
+// The number is checked but never read back. What the caller needs is which backup a document
+// belongs to, and a chunk whose index says something impossible is still that backup's chunk.
+// What the check is for is the other direction: without it `<id>.partial` or `<id>.part.bak`
+// — names telstore never writes, but names a person can give a file they upload themselves —
+// would be read as chunks of a backup and destroyed along with it.
+export function isChunkFileName(id, fileName) {
+  if (typeof fileName !== 'string') return false
+
+  const prefix = `${id}${CHUNK_INFIX}`
+
+  if (!fileName.startsWith(prefix)) return false
+
+  const number = fileName.slice(prefix.length)
+
+  return number.length > 0 && /^[0-9]+$/.test(number)
 }
 
 // The suffix telstore has written on every manifest since version 1, and what `list` picks

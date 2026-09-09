@@ -8,6 +8,7 @@ import {
 } from '../client.js'
 import { configFile, defaultConfigDir, loadConfig } from '../config.js'
 import { MANIFEST_SUFFIX } from '../manifest.js'
+import { createWalkNotice } from '../progress.js'
 import { assertLoggedIn } from '../session.js'
 import { requireChat, resolveSettings } from '../settings.js'
 
@@ -146,37 +147,6 @@ function searchableFields(message) {
 // answer this project exists to refuse.
 function matchesTerm(message, term) {
   return searchableFields(message).some((field) => field.toLowerCase().includes(term))
-}
-
-// A walk of one page is over in about the time it takes to notice — 165ms against a real
-// chat — and that is the usual case, so nothing is drawn for the first stretch: a line that
-// appears and is wiped in the same breath is a flicker, not information. Past that the read
-// is long enough that silence reads as the hang this project refuses everywhere else.
-//
-// \r only moves the cursor home, so every line is padded to the widest one drawn and the last
-// write wipes the row: the table that follows must never land on half a progress line.
-const NOTICE_QUIET_MS = 400
-const NOTICE_INTERVAL_MS = 200
-
-function createWalkNotice({ write, now, quietMs = NOTICE_QUIET_MS, intervalMs = NOTICE_INTERVAL_MS }) {
-  const startedAt = now()
-  let lastDrawnAt = 0
-  let widest = 0
-
-  return {
-    tick(text) {
-      if (now() - startedAt < quietMs) return
-      if (lastDrawnAt !== 0 && now() - lastDrawnAt < intervalMs) return
-
-      lastDrawnAt = now()
-      widest = Math.max(widest, text.length)
-      write(`\r${text.padEnd(widest)}`)
-    },
-    clear() {
-      if (widest === 0) return
-      write(`\r${' '.repeat(widest)}\r`)
-    },
-  }
 }
 
 function renderTable(rows) {

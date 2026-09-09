@@ -56,3 +56,87 @@ that the user did not ask for, nothing reported gone that is still there.
   it, and this command removes what was asked for and nothing else — the same line `pruneRestores`
   will not cross. It is named on the way out instead, because nothing can finish it now, and a
   file nobody is told about is one nobody will ever think to reclaim.
+- **`delete` reads the chat for chunks carrying the backup id, and does not take the local
+  list for what is there.** The reason it has to is dated 2026-09-09 and written up in
+  `docs/design/data-integrity.md`: a stream upload left behind by a second Ctrl-C put a chunk
+  in the chat that its own record never named, and the `delete` line that run printed removed
+  the two ids it knew about, said "Done", and left 12MB standing. Three other fixes were on
+  the table — recording each send's intent before it goes out, tearing the socket down before
+  the process leaves, and simply softening the wording — and each of them closes one escape
+  route. The walk was taken instead because it does not need the route named: a chunk in the
+  chat is found because it is in the chat, whatever put it there, including the causes nobody
+  has enumerated yet. It also picked up two orphans that were already possible and that nobody
+  had gone looking for — a file upload that dies between `sendChunk` returning and
+  `markChunkDone` writing, whose next run re-sends that chunk and strands the first copy under
+  a manifest that names only the second, and a run whose record was cleared before it held an
+  id at all, where `delete` used to answer "No backup found" over chunks that were plainly
+  there.
+- **What makes a document this backup's chunk is the file name telstore wrote on it**, through
+  `isChunkFileName`, and never the caption beside it — the rule `findManifestMessage` already
+  keeps and for the identical reason: a caption is text a person can edit and a file name is
+  not. The number after `.part` is checked and never read back. What the check is for is the
+  other direction: `<id>.partial` and `<id>.part0001.bak` are names telstore never writes but
+  a person can give a file they upload themselves, and the prefix alone would have destroyed
+  them along with the backup — the one mistake in this command that nothing undoes.
+- **Where the walk stops, in the order the bounds are tried.** All three are floors, and the
+  first to fire wins because each of them is sound on its own.
+  - *The oldest message id this backup is known to have sent.* Exact, and it needs no clock:
+    telstore sends chunk 0 first and records each id as it lands, so a record's `done` and a
+    manifest's chunk list are both prefixes of what the run actually sent, and the smallest id
+    either names is the backup's first message. Nothing of it lies below. This is the floor in
+    every ordinary delete, and it is why the walk that catches the measured leak reads about
+    four documents rather than an archive.
+  - *The day the backup id carries, less one day.* Only when the first floor does not exist —
+    a record cleared before it held an id, or no record at all. `newBackupId` stamps that day
+    from the clock of the machine making the backup and a document's date comes from
+    Telegram's, so the two need not agree; the day of slack is for that gap and nothing else. A
+    machine wrong by more than a day dates every backup wrongly in `list`, and this floor is
+    only ever reached in the case where `delete` previously refused outright, so it cannot make
+    any answer worse than the one it replaced.
+  - *`MAX_DELETE_DOCUMENTS`, 20000.* Its own number rather than `list`'s `MAX_LIST_DOCUMENTS`,
+    which is exactly 10000 and would stop this walk one document short of the largest backup
+    telstore makes: `MAX_CHUNKS` chunks with a manifest over them is 10,001 documents of
+    telstore's own before a single foreign one is counted.
+  Chunks the walk finds deliberately do **not** lower the floor, tempting as that is. A chunk
+  removed by hand out of the middle of a backup breaks the chain, and the next document down
+  would then be below the last one found rather than above it — a walk that stops early and
+  says nothing, which is the failure this whole entry exists to remove.
+- **The walk starts under the card when the chat search returned one.** A backup's manifest is
+  the last message its run sends, in both upload paths, so nothing of that backup is newer than
+  its own card and everything posted since belongs to somebody else. `iterDocuments` grew an
+  `offsetId` for it. Without that a delete of a year-old backup would read every document
+  posted in the chat since, a page per hundred, to find chunks that all sit under the card.
+- **Every delete walks, not only the ones a record calls a stream.** The gate would have been
+  cheap to write and it would have covered the measured case exactly, which is the argument
+  against it: the file path has its own way of stranding a chunk (above), and a rule shaped
+  around the one leak that has been seen is a rule that misses the next one. The cost is
+  bounded by the backup's own footprint — roughly one read per hundred chunks, against a
+  command that is already sending one delete per hundred — because both ends of the walk are
+  the backup's own messages.
+- **A batch does not walk for an id that neither the search nor a record knows.** `runDeletes`
+  asks about every id at once and before anything is destroyed, so a walk apiece would turn one
+  mistyped id in a list of five into minutes spent reading somebody's archive. It refuses as it
+  always did; what changed is that it no longer says "not found in <chat>", which after this
+  entry is a claim about a question it did not ask. It says there is no manifest, and points at
+  the single-id form that does read the chat.
+- **"Done" is a claim, and only a walk that reached a floor earns it.** A walk stopped by
+  `MAX_DELETE_DOCUMENTS` removed everything it found and cannot say what is behind it, so the
+  report drops the word and says how far it read instead — and the "no backup found" refusal
+  says the same, because "not found" over a chat nobody read to the bottom of is a statement
+  about somewhere the command never looked. Chunks the walk found that nothing on this machine
+  names are said twice: once above the question that authorises the removal, counted inside the
+  number that question quotes, and once in the closing report. Neither line is alarm — a leftover
+  chunk is what the walk was added to find, and finding one is it working.
+- The walk is now a second way to the card `manifestMsgId` was added for, since it meets the
+  manifest on the way down whenever the text index has gone quiet. The field stays anyway: it
+  is one field against a read of the chat, `status` answers from it without connecting at all,
+  and the bullet above about folding it into `stateMessageIds` is untouched by any of this.
+- **What none of this can see.** The fake client cannot produce the race that motivated it —
+  that is the whole finding — so the tests prove the walk finds a chunk the record does not
+  name, that the wording is honest, and that a delete with nothing stray behaves as it did
+  before, and nothing more. Against a real account this has not been run: the next e2e should
+  repeat the second-Ctrl-C stream upload and check that the printed `delete` now empties the
+  chat in all three runs rather than two. The floors have their own blind spots, each named
+  where it is described above, and the largest is that a backup whose oldest known id is wrong
+  — a hand-edited record with chunk 0 taken out of it — moves the floor up and hides anything
+  below it.
