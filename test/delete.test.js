@@ -2,6 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { promises as fs } from 'node:fs'
 
+import { Api } from 'teleproto'
+
 import { runDelete } from '../src/commands/delete.js'
 import { saveConfig } from '../src/config.js'
 import {
@@ -611,9 +613,11 @@ test('a restore record whose .partial is already gone is dropped without a word 
 // can produce that race — what it can do is prove delete no longer takes the record's word
 // for what is in the chat.
 
-// The day every document below is stamped with: after the day ID carries, so nothing here
-// stops the walk by being older than the backup itself.
-const DAY = Date.UTC(2026, 8, 6) / 1000
+// The day ID carries, the hour this backup's own run posted in, and a date two days under
+// the id's day — which is below the floor, since the floor is that day less one.
+const ID_DAY = Date.UTC(2026, 8, 5) / 1000
+const DAY = ID_DAY + 3600
+const OLD = ID_DAY - 2 * 86400
 
 const chunkDoc = (msgId, index, backup = ID) => ({
   id: msgId,
@@ -621,13 +625,35 @@ const chunkDoc = (msgId, index, backup = ID) => ({
   date: DAY,
 })
 
+// The raw message toDocument keeps beside the flat fields. It is a real Api.Message because
+// that is what readMessageBytes hands to teleproto's downloadMedia, which treats anything
+// else as media, matches it against no Api class, and throws "Cannot download media of type
+// object" — a shape no fake would ever complain about.
+const rawMessage = (msgId, date) =>
+  new Api.Message({
+    id: msgId,
+    peerId: new Api.PeerChannel({ channelId: BigInt(1) }),
+    date,
+    message: '',
+  })
+
 const cardDoc = (msgId, backup = ID) => ({
   id: msgId,
   fileName: manifestFileName(backup),
   date: DAY,
+  message: rawMessage(msgId, DAY),
 })
 
 const otherDoc = (msgId, fileName, date = DAY) => ({ id: msgId, fileName, date })
+
+// docs/design/testing-blind-spots.md: an object handed to teleproto is checked against
+// teleproto's own idea of it, never against a fake's willingness to accept anything.
+function assertRealMessage(message) {
+  assert.ok(
+    message instanceof Api.Message,
+    'expected the raw Api.Message, not the flat document iterDocuments yields',
+  )
+}
 
 // A chat as iterDocuments hands it over — newest first, and honouring the offsetId and the
 // ceiling the caller asked for. Each call is kept, with how many documents the walk actually
@@ -743,15 +769,15 @@ test('a delete with nothing stray in the chat says nothing new about it', async 
 
 // The walk is bounded by the backup's own messages: telstore sends chunk 0 first and records
 // each id as it lands, so the oldest id it knows is the oldest message this backup has in the
-// chat and there is nothing of it below. A walk without that floor reads somebody's whole
-// archive to find a chunk that was three messages from the top.
-test('the walk stops at the oldest message the backup is known to have sent', async () => {
+// chat. A walk without that bound reads somebody's whole archive to find a chunk that was
+// three messages from the top.
+test('the walk stops just past the oldest message the backup is known to have sent', async () => {
   const configDir = await workspace()
   const chat = chatOf([
     chunkDoc(500, 0),
     chunkDoc(501, 1),
     chunkDoc(502, 2),
-    ...Array.from({ length: 50 }, (_, i) => otherDoc(400 - i, `somebody-else-${i}.zip`)),
+    ...Array.from({ length: 50 }, (_, i) => otherDoc(400 - i, `somebody-else-${i}.zip`, OLD)),
   ])
 
   await unfinishedStream(configDir, {
@@ -761,7 +787,70 @@ test('the walk stops at the oldest message the backup is known to have sent', as
   await runDelete(ID, {}, deps(configDir, { rec: recorder(), readDocuments: chat.readDocuments }))
 
   assert.equal(chat.walks.length, 1)
-  assert.equal(chat.walks[0].read, 3)
+  // Three of the backup's own, then the first document that is both under its oldest known
+  // id and older than the day its id carries. The other forty-nine are never read.
+  assert.equal(chat.walks[0].read, 4)
+})
+
+// Neither floor is trusted alone, so neither can end the walk alone. A document that is older
+// in date but newer in id — a file forwarded into the chat, a clock that disagreed — would end
+// it if the date decided by itself, and the chunk below would never be seen.
+test('a document older than the backup does not stop the walk while its id is above the floor', async () => {
+  const configDir = await workspace()
+  const rec = recorder()
+  const chat = chatOf([
+    otherDoc(503, 'forwarded-from-years-ago.zip', OLD),
+    chunkDoc(502, 2),
+    chunkDoc(500, 0),
+  ])
+
+  await unfinishedStream(configDir)
+
+  await runDelete(ID, {}, deps(configDir, { rec, readDocuments: chat.readDocuments }))
+
+  assert.deepEqual(rec.ids(), [500, 502])
+})
+
+// The mirror of it: a record with chunk 0 taken out of it raises the id floor over chunks
+// that are really there, and a record is a file anybody can edit. The day the id carries is
+// derived from what the user typed and no file can move it, so it holds the walk down.
+test('a record missing its first chunk does not hide the chunks below it', async () => {
+  const configDir = await workspace()
+  const rec = recorder()
+  const chat = chatOf([
+    chunkDoc(502, 2),
+    chunkDoc(501, 1),
+    chunkDoc(500, 0),
+    otherDoc(499, 'older.zip', OLD),
+  ])
+
+  // As though chunk 0's entry had been edited out: the record starts at 501.
+  await unfinishedStream(configDir, { done: { 1: { msgId: 501, size: 4, sha256: 'x' } } })
+
+  await runDelete(ID, {}, deps(configDir, { rec, readDocuments: chat.readDocuments }))
+
+  assert.deepEqual(rec.ids(), [500, 501, 502])
+})
+
+// Where only one floor exists it decides alone. An id telstore did not mint carries no day,
+// so the record's oldest id is all there is to stop at.
+test('an id with no day in it stops at the oldest message the record names', async () => {
+  const configDir = await workspace()
+  const chat = chatOf([
+    chunkDoc(502, 2, 'homemade'),
+    chunkDoc(500, 0, 'homemade'),
+    ...Array.from({ length: 30 }, (_, i) => otherDoc(400 - i, `else-${i}.zip`)),
+  ])
+
+  await unfinishedStream(configDir, { id: 'homemade' })
+
+  await runDelete(
+    'homemade',
+    {},
+    deps(configDir, { rec: recorder(), readDocuments: chat.readDocuments }),
+  )
+
+  assert.equal(chat.walks[0].read, 2)
 })
 
 // A backup's manifest is the last message its run sends, so nothing of that backup is newer
@@ -841,11 +930,44 @@ test('a manifest the search missed is found by the walk and removed last', async
       rec,
       readDocuments: chat.readDocuments,
       searchManifest: async () => null,
-      readMessageBytes: async () => serializeManifest(manifestBody()),
+      readMessageBytes: async (client, message) => {
+        // What teleproto's downloadMedia does with the argument it is given: an Api.Message
+        // is a message to download the media of, and anything else is treated as media
+        // itself, matches no Api class, and dies with "Cannot download media of type object".
+        // The flat document iterDocuments yields is exactly that anything else, so a walk
+        // that handed it over would be dead on the one path this test exists for — and no
+        // fake that ignores its argument would ever say so.
+        assertRealMessage(message)
+        return serializeManifest(manifestBody())
+      },
     }),
   )
 
   assert.deepEqual(rec.calls, [[1000, 1001, 1002], [2000]])
+})
+
+// The same guard on the path the search index does answer, so the two callers of
+// readManifest cannot drift apart about what they hand over.
+test('the manifest the search found is handed over as a message teleproto can download', async () => {
+  const configDir = await workspace()
+  let seen = null
+
+  await runDelete(
+    ID,
+    { yes: true },
+    deps(configDir, {
+      manifest: manifestBody(),
+      rec: recorder(),
+      searchManifest: async () => rawMessage(2000, DAY),
+      readMessageBytes: async (client, message) => {
+        seen = message
+        assertRealMessage(message)
+        return serializeManifest(manifestBody())
+      },
+    }),
+  )
+
+  assert.equal(seen.id, 2000)
 })
 
 // Those three chunks are named by the card the walk found on its way past, so none of them is
@@ -906,20 +1028,29 @@ test('chunks in the chat are removed even with no manifest and no record', async
   assert.match(question, /Delete the 2 chunk messages it sent\?/)
 })
 
-// The floor for a walk that knows no message id of its own is the day the backup id carries,
-// with a day of slack under it: nothing that backup sent can be older than the day it was
-// made, whatever else is in the chat below.
-test('a walk with no id to stop at stops at the day the backup id carries', async () => {
+// A walk that knows no message id of its own stops at the day the backup id carries, less a
+// day. Both halves of that are load-bearing, and the two documents below sit either side of
+// the boundary to say so: the floor has to be a day *under* the id's day, because a floor
+// even an hour above the oldest message this backup sent stops the walk early, sets complete,
+// and prints "Done" over documents nobody read.
+test('a walk with no id to stop at stops one day under the day the backup id carries', async () => {
   const configDir = await workspace()
   const chat = chatOf([
     chunkDoc(500, 0),
-    otherDoc(499, 'older.zip', Date.UTC(2026, 8, 3) / 1000),
+    // Exactly on the floor, which is not below it: still read.
+    otherDoc(499, 'one-day-under.zip', ID_DAY - 86400),
+    // One second further down, and the walk ends here.
+    otherDoc(498, 'a-second-older.zip', ID_DAY - 86400 - 1),
     ...Array.from({ length: 40 }, (_, i) => otherDoc(400 - i, `ancient-${i}.zip`, 0)),
   ])
 
-  await runDelete(ID, { yes: true }, deps(configDir, { rec: recorder(), readDocuments: chat.readDocuments }))
+  await runDelete(
+    ID,
+    { yes: true },
+    deps(configDir, { rec: recorder(), readDocuments: chat.readDocuments }),
+  )
 
-  assert.equal(chat.walks[0].read, 2)
+  assert.equal(chat.walks[0].read, 3)
 })
 
 // A walk stopped by its own ceiling has not reached the start of the backup and cannot say
@@ -1054,7 +1185,7 @@ test('a walk that reaches the floor on its last permitted read is still complete
     chunkDoc(502, 2),
     chunkDoc(501, 1),
     chunkDoc(500, 0),
-    otherDoc(499, 'older.zip'),
+    otherDoc(499, 'older.zip', OLD),
   ])
 
   await unfinishedStream(configDir, {
@@ -1064,10 +1195,36 @@ test('a walk that reaches the floor on its last permitted read is still complete
   await runDelete(
     ID,
     { yes: true },
-    deps(configDir, { rec: recorder(), out, readDocuments: chat.readDocuments, maxDocuments: 3 }),
+    deps(configDir, { rec: recorder(), out, readDocuments: chat.readDocuments, maxDocuments: 4 }),
   )
 
-  assert.equal(chat.walks[0].read, 3)
+  assert.equal(chat.walks[0].read, 4)
   assert.match(out.text(), /Done\. Removed/)
   assert.doesNotMatch(out.text(), /without reaching the start/)
+})
+
+// Same class of false sentence as the "File" row and the question: on the path where only the
+// walk of the chat found these, there is no local record that could have been left in place,
+// and saying one was sends somebody looking through ~/.telstore for a file nothing wrote.
+test('a refused removal with no record does not claim a record was kept', async () => {
+  const configDir = await workspace()
+  const chat = chatOf([chunkDoc(501, 1), chunkDoc(500, 0), otherDoc(499, 'older.zip', OLD)])
+
+  await assert.rejects(
+    () =>
+      runDelete(
+        ID,
+        { yes: true },
+        deps(configDir, {
+          rec: recorder({ failAfter: 1 }),
+          readDocuments: chat.readDocuments,
+        }),
+      ),
+    (err) => {
+      assert.doesNotMatch(err.message, /local record was left in place/)
+      assert.match(err.message, /Nothing on this machine names the rest/)
+      assert.match(err.message, /Removed 1 of 2 chunk messages/)
+      return true
+    },
+  )
 })

@@ -108,11 +108,13 @@ function stateManifestId(record) {
 // telstore makes — so this is its own number rather than that one borrowed.
 export const MAX_DELETE_DOCUMENTS = 20000
 
-// A day of slack under the day the backup id carries. That day comes from the clock of the
-// machine that made the backup and a document's date comes from Telegram's, and the two need
-// not agree. A day is far more than a skew anybody would leave unnoticed — a machine a day
-// out dates every backup wrongly in `list` — and the slack costs one extra day of documents
-// read, in the one case where telstore knows nothing else about where this backup begins.
+// The slack under the day the backup id carries, and it is subtracted rather than added: the
+// floor has to sit *below* everything this backup could have sent, and a floor one day too
+// high stops the walk early, sets `complete`, and prints "Done" over documents nobody read.
+// That day comes from the clock of the machine that made the backup and a document's date
+// comes from Telegram's, and the two need not agree; a day is far more than a skew anybody
+// would leave unnoticed, since a machine a day out dates every backup wrongly in `list`. The
+// cost is one extra day of documents read.
 const DAY_SECONDS = 86400
 
 // What the manifest and the local record between them cannot promise: everything of this
@@ -122,11 +124,25 @@ const DAY_SECONDS = 86400
 // removed with 12MB of it still sitting there. Every chunk carries the backup id in the file
 // name telstore wrote, so the chat can be asked instead of taken on trust.
 //
-// Newest first, down to a floor the backup's own messages give: telstore sends chunk 0 first
-// and records each id as it lands, so the ids it knows are a prefix of the ids it sent and
-// the smallest of them is the oldest message this backup has in the chat. Nothing of it lies
-// below that. Where no such id exists — a record cleared before it held one, or none left at
-// all — the day in the id is the floor instead, and the budget is the floor under that.
+// Newest first, and it stops only where *every* floor it has agrees that there is nothing of
+// this backup further down. There are two, and neither is trusted to be right on its own:
+//
+//   - The oldest message id the backup is known to have sent. telstore sends chunk 0 first
+//     and records each id as it lands, so the ids it knows are a prefix of the ids it sent
+//     and the smallest is the backup's first message. That argument holds for records and
+//     manifests telstore wrote; it does not hold for the hand-edited ones both of them are,
+//     and a record with chunk 0 taken out of it raises this floor over chunks that are
+//     really there.
+//   - The day the backup id carries, less a day. Derived from the id the user typed rather
+//     than from any file, so a doctored record cannot move it — but it is the uploading
+//     machine's clock against Telegram's, which is the reason for the slack.
+//
+// Requiring both is what makes each one's blind spot somebody else's problem: an id floor
+// lifted by an edited record is held down by the date, and a date floor lifted by a wrong
+// clock is held down by the id. It costs one extra day of documents, and the alternative is
+// a walk that stops early and then says "Done", which is the failure this exists to remove.
+// Where only one floor exists it decides alone, and where neither does the budget is all
+// there is.
 //
 // Chunks found do not lower the floor. It is tempting, and it is how a walk with no floor at
 // all quietly stops early: a chunk deleted by hand out of the middle breaks the chain, and
@@ -146,7 +162,12 @@ async function findChunksInChat(client, chat, backupId, options) {
   for (const id of known) floorId = floorId === null ? id : Math.min(floorId, id)
 
   const day = backupIdDay(backupId)
-  const floorDate = floorId === null && day !== null ? day - DAY_SECONDS : null
+  const floorDate = day === null ? null : day - DAY_SECONDS
+
+  const floors = []
+
+  if (floorId !== null) floors.push((document) => document.id <= floorId)
+  if (floorDate !== null) floors.push((document) => document.date < floorDate)
 
   const chunks = []
   let manifest = null
@@ -166,15 +187,15 @@ async function findChunksInChat(client, chat, backupId, options) {
       // The same rule findManifestMessage keeps, reached without the text index: a document
       // named <id>.manifest.json is this backup's card. Only used when the search came back
       // with nothing, and docs/design/captions.md is the record of how often that happens.
-      manifest = document
+      //
+      // The raw message, not the flat document around it — the same thing findManifestMessage
+      // hands back, because both of them feed readMessageBytes and teleproto's downloadMedia
+      // takes an Api.Message or treats its argument as media and throws "Cannot download media
+      // of type object". One shape for one job, so the next reader cannot pick the wrong half.
+      manifest = document.message
     }
 
-    if (floorId !== null && document.id <= floorId) {
-      reachedFloor = true
-      break
-    }
-
-    if (floorDate !== null && document.date < floorDate) {
+    if (floors.length > 0 && floors.every((below) => below(document))) {
       reachedFloor = true
       break
     }
@@ -337,11 +358,7 @@ export async function runDelete(backupId, options = {}, deps = {}) {
 
     // Counted after the walk's own manifest has had its say, or a card the search missed
     // would have every one of its chunks reported as a message nothing names.
-    //
-    // Sorted for the reason stateMessageIds sorts by chunk index: the walk hands them over
-    // newest first, and a message id climbs with the chunk it carries, so ascending is the
-    // order this backup was sent in and the order the report's "removed 3 of 5" counts in.
-    const strays = walk.chunks.filter((id) => !ids.has(id)).sort((a, b) => a - b)
+    const strays = walk.chunks.filter((id) => !ids.has(id))
 
     for (const id of strays) ids.add(id)
 
@@ -354,7 +371,12 @@ export async function runDelete(backupId, options = {}, deps = {}) {
       )
     }
 
-    const chunkIds = [...ids]
+    // Sorted for the reason stateMessageIds sorts by chunk index, now that a third source
+    // feeds this set: a message id climbs with the chunk it carries, so ascending is the
+    // order this backup was sent in and the order the report's "removed 3 of 5" counts in.
+    // Insertion order is not that — the walk hands its chunks over newest first, and a stray
+    // older than everything the record names would otherwise go out in the middle.
+    const chunkIds = [...ids].sort((a, b) => a - b)
 
     // Where this backup's manifest is, if anywhere. The chat's own answer wins over the
     // record's, the way it does for the chunk ids above: the record is a file on disk that a
@@ -418,11 +440,18 @@ export async function runDelete(backupId, options = {}, deps = {}) {
       throw new Error(
         `Removed ${removed} of ${plural(chunkIds.length, 'chunk message')} of ${backupId}, ` +
           `then Telegram refused: ${err.message}. ` +
+          // What is still standing that can name the rest, and nothing else. Where the walk
+          // of the chat is the only thing that found these there is no such list on this
+          // machine at all, and saying a record was kept when there is none sends somebody
+          // looking through ~/.telstore for a file that was never written.
           (manifestMessage
             ? 'The manifest was left in place on purpose — it is the only list of the ' +
               'messages that are still there. '
-            : 'The local record was left in place on purpose — it is the only list of the ' +
-              'messages that are still there. ') +
+            : record
+              ? 'The local record was left in place on purpose — it is the only list of the ' +
+                'messages that are still there. '
+              : `Nothing on this machine names the rest: reading ${chatName(chat)} for ` +
+                `${backupId} is what found them, which is what running this again does. `) +
           'Run the same command again to finish.',
       )
     }

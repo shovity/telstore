@@ -56,6 +56,13 @@ that the user did not ask for, nothing reported gone that is still there.
   it, and this command removes what was asked for and nothing else — the same line `pruneRestores`
   will not cross. It is named on the way out instead, because nothing can finish it now, and a
   file nobody is told about is one nobody will ever think to reclaim.
+- The card the walk meets is handed on as the raw `Api.Message`, the same thing
+  `findManifestMessage` returns, because both of them feed `readMessageBytes` and teleproto's
+  `downloadMedia` treats a non-`Api.Message` argument as media itself, matches it against no
+  `Api` class, and throws `Cannot download media of type object`. The flat document
+  `iterDocuments` yields is exactly that argument. It shipped wrong once and no fake noticed,
+  which is `docs/design/testing-blind-spots.md`'s rule in one line: the tests assert the shape
+  handed over, not the fake's willingness to take anything.
 - **`delete` reads the chat for chunks carrying the backup id, and does not take the local
   list for what is there.** The reason it has to is dated 2026-09-09 and written up in
   `docs/design/data-integrity.md`: a stream upload left behind by a second Ctrl-C put a chunk
@@ -78,21 +85,31 @@ that the user did not ask for, nothing reported gone that is still there.
   other direction: `<id>.partial` and `<id>.part0001.bak` are names telstore never writes but
   a person can give a file they upload themselves, and the prefix alone would have destroyed
   them along with the backup — the one mistake in this command that nothing undoes.
-- **Where the walk stops, in the order the bounds are tried.** All three are floors, and the
-  first to fire wins because each of them is sound on its own.
-  - *The oldest message id this backup is known to have sent.* Exact, and it needs no clock:
-    telstore sends chunk 0 first and records each id as it lands, so a record's `done` and a
-    manifest's chunk list are both prefixes of what the run actually sent, and the smallest id
-    either names is the backup's first message. Nothing of it lies below. This is the floor in
-    every ordinary delete, and it is why the walk that catches the measured leak reads about
-    four documents rather than an archive.
-  - *The day the backup id carries, less one day.* Only when the first floor does not exist —
-    a record cleared before it held an id, or no record at all. `newBackupId` stamps that day
-    from the clock of the machine making the backup and a document's date comes from
-    Telegram's, so the two need not agree; the day of slack is for that gap and nothing else. A
-    machine wrong by more than a day dates every backup wrongly in `list`, and this floor is
-    only ever reached in the case where `delete` previously refused outright, so it cannot make
-    any answer worse than the one it replaced.
+- **Where the walk stops: every floor it has must agree, and neither of the two is trusted
+  alone.** The first draft tried them in order and stopped at whichever fired first, which
+  reads as the cheap option and is the expensive mistake — each floor has a way of sitting
+  *above* a chunk that is really there, and a floor one document too high sets the flag that
+  prints "Done".
+  - *The oldest message id this backup is known to have sent.* Needs no clock: telstore sends
+    chunk 0 first and records each id as it lands, so a record's `done` and a manifest's chunk
+    list are both prefixes of what the run actually sent, and the smallest id either names is
+    the backup's first message. Its blind spot is that both of those are files a person can
+    edit, which is why `stateMessageIds` and `manifestMessageIds` check every id's shape
+    before anything is destroyed — and a record with chunk 0 taken out of it passes both those
+    checks while lifting this floor over chunks that are still in the chat.
+  - *The day the backup id carries, less one day.* Derived from the id the user typed rather
+    than from any file, so nothing on disk can move it. Its blind spot is the other one:
+    `newBackupId` stamps that day from the clock of the machine making the backup and a
+    document's date comes from Telegram's. The day of slack is for that gap and nothing else,
+    and it is subtracted — a floor above the backup's own first message is the failure, so the
+    slack only ever has to be able to point downwards.
+  Requiring both makes each one's blind spot the other's problem: an id floor lifted by an
+  edited record is held down by the date, and a date floor lifted by a wrong clock is held
+  down by the id. It costs one extra day of documents read, which is the cheapest thing in
+  this entry, and the alternative was writing "a hand-edited record can hide chunks" into this
+  file as though naming a hole were the same as closing one. Where only one floor exists — an
+  id telstore did not mint carries no day — it decides alone, and where neither does there is
+  only the budget.
   - *`MAX_DELETE_DOCUMENTS`, 20000.* Its own number rather than `list`'s `MAX_LIST_DOCUMENTS`,
     which is exactly 10000 and would stop this walk one document short of the largest backup
     telstore makes: `MAX_CHUNKS` chunks with a manifest over them is 10,001 documents of
@@ -136,7 +153,6 @@ that the user did not ask for, nothing reported gone that is still there.
   name, that the wording is honest, and that a delete with nothing stray behaves as it did
   before, and nothing more. Against a real account this has not been run: the next e2e should
   repeat the second-Ctrl-C stream upload and check that the printed `delete` now empties the
-  chat in all three runs rather than two. The floors have their own blind spots, each named
-  where it is described above, and the largest is that a backup whose oldest known id is wrong
-  — a hand-edited record with chunk 0 taken out of it — moves the floor up and hides anything
-  below it.
+  chat in all three runs rather than two. What remains uncovered is what neither floor bounds:
+  a chat where the walk reaches `MAX_DELETE_DOCUMENTS`, which is the one ending that does not
+  claim to be complete and says so instead.
