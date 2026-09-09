@@ -42,8 +42,32 @@ function resumeCommand(state, destination) {
 // a backup somewhere else. A delete pasted a week later, or run under a --chat this report
 // was given, would destroy whatever happens to carry those ids in the chat it resolves. The
 // few characters cost nothing; leaving them out costs somebody else's messages.
-function deleteCommand(state) {
-  return `npx telstore delete ${shellArg(state.id)} --chat ${shellArg(state.chat)}`
+function deleteCommand(id, chat) {
+  return `npx telstore delete ${shellArg(id)} --chat ${shellArg(chat)}`
+}
+
+// status is the command someone runs *because* something is wrong, so a record a truncated
+// write or a hand edit mangled is nearer its normal case than its edge case. These two read
+// what a stream record claims and say when it claims nothing, because the alternative is the
+// report this block was written to end: `From undefined`, `--chat undefined`.
+function describeSource(state) {
+  return typeof state.name === 'string' && state.name.trim() !== ''
+    ? `${state.name} (a command's output)`
+    : "a command's output this record does not name"
+}
+
+// Null is what stops a delete command being built at all. A record that cannot say where its
+// chunks went would produce `--chat undefined`, and a command carrying that is worse than no
+// command: runDelete would take it as no destination at all, resolve one from config, and
+// fire these message ids at whatever peer that turns out to be. Written as String(chat), so
+// anything else here is damage; a number is still taken, because a channel id is one.
+function recordChat(state) {
+  const { chat } = state
+
+  if (typeof chat === 'number' && Number.isFinite(chat)) return String(chat)
+  if (typeof chat === 'string' && chat.trim() !== '') return chat
+
+  return null
 }
 
 // Why a resume is off the table, in the words of the thing the user would have to fix. The
@@ -255,10 +279,29 @@ export async function runStatus(options = {}, deps = {}) {
     // chunks sitting in a chat with nothing pointing at them, which is a different sentence
     // and a different command: the only thing anyone can do with them is remove them.
     if (resume.reason === 'stream') {
-      log(field('From', `${state.name} (a command's output)`))
-      log(field('Chunks', `${plural(done, 'chunk')} in the chat, with no manifest naming them`))
-      log(field('Chat', describeChat(state.chat)))
-      log(field('Remove', deleteCommand(state)))
+      const chat = recordChat(state)
+
+      // Whether a manifest went out is the difference between chunks nothing can name and a
+      // backup that is whole but unrecorded, and the record is what says which — a rollback
+      // that could not finish writes the card's id here. status asks Telegram nothing in this
+      // block, so it reports the record's claim as the record's claim rather than as a fact
+      // about the chat, which is the same care delete takes when its search comes up empty.
+      const manifest =
+        state.manifestMsgId === undefined
+          ? 'with no manifest naming them'
+          : 'and the manifest its record names'
+
+      log(field('From', describeSource(state)))
+      log(field('Chunks', `${plural(done, 'chunk')} in the chat, ${manifest}`))
+      log(field('Chat', chat === null ? 'the record does not say' : describeChat(chat)))
+      log(
+        field(
+          'Remove',
+          chat === null
+            ? 'not possible: the record does not say which chat the chunks are in.'
+            : deleteCommand(state.id, chat),
+        ),
+      )
       continue
     }
 

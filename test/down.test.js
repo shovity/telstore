@@ -36,9 +36,13 @@ async function anUpload(configDir, { id, file, chat = 'me' }) {
   return key
 }
 
-async function aStream(configDir, { id, name, chat = 'me' }) {
+async function aStream(configDir, { id, name, chat = 'me', ...rest }) {
   const key = streamKey(id)
-  await saveState(key, { v: 1, kind: 'stream', id, name, chat, chunkSize: 10, done: {} }, configDir)
+  await saveState(
+    key,
+    { v: 1, kind: 'stream', id, name, chat, chunkSize: 10, done: {}, ...rest },
+    configDir,
+  )
   return key
 }
 
@@ -370,4 +374,46 @@ test('down does not offer to carry on what a command wrote', async () => {
   await runDown([], {}, { configDir, log: out.log, ...YES })
 
   assert.match(out.text(), /cannot be carried on/)
+})
+
+// down.md's own precedent: the resume command for a .partial is printed "because this is the
+// last time anything will mention that file". A stream record is the sharper case. It cannot
+// be re-run onto — those bytes have gone past — so after down there is no list of those chunks
+// on this machine and no manifest naming them in the chat: they are findable by nothing. The
+// command that removes them is the last thing anything will ever say about them.
+test('down prints the command that removes the chunks a stream record is the only list of', async () => {
+  const configDir = await tempDir('down')
+  const out = collect()
+  await saveConfig(LOGGED_IN, configDir)
+  await aStream(configDir, { id: 'telstore-20260909-c0ffee', name: 'db.sql', chat: '@store' })
+
+  await runDown([], {}, { configDir, log: out.log, ...YES })
+
+  assert.match(out.text(), /npx telstore delete telstore-20260909-c0ffee --chat @store$/m)
+})
+
+// `delete` resolves its own destination from config, so a command printed without --chat would
+// fire these ids at whatever chat is configured when it is pasted. The chat goes through
+// shellArg for the same reason every other printed command does: it has to survive the shell.
+test('the chat a stream record names is quoted so the command can be pasted', async () => {
+  const configDir = await tempDir('down')
+  const out = collect()
+  await saveConfig(LOGGED_IN, configDir)
+  await aStream(configDir, { id: 'telstore-1', name: 'db.sql', chat: 'my chat' })
+
+  await runDown([], {}, { configDir, log: out.log, ...YES })
+
+  assert.match(out.text(), /npx telstore delete telstore-1 --chat 'my chat'$/m)
+})
+
+test('a stream record that cannot say which chat gets no command telstore could not honour', async () => {
+  const configDir = await tempDir('down')
+  const out = collect()
+  await saveConfig(LOGGED_IN, configDir)
+  await aStream(configDir, { id: 'telstore-1', name: 'db.sql', chat: '' })
+
+  await runDown([], {}, { configDir, log: out.log, ...YES })
+
+  assert.doesNotMatch(out.text(), /npx telstore delete/)
+  assert.match(out.text(), /telstore-1\n\s+this record does not say which chat/)
 })

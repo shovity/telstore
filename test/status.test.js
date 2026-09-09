@@ -403,6 +403,51 @@ test('a chat that needs quoting is quoted so the delete command can be pasted', 
   assert.match(await report(configDir), /--chat 'my chat'$/m)
 })
 
+// The record delete reads a manifest id out of is exactly the record a failed rollback leaves
+// behind, so "with no manifest naming them" is a claim its own record can contradict — the
+// same claim delete guards where it says a search returned nothing rather than that nothing
+// was sent. status asks Telegram nothing here, so it reports what the record says and says
+// that is what it is.
+test('a stream record whose manifest went out is not said to have none', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+  await saveStream(configDir, { manifestMsgId: 900 })
+
+  const text = await report(configDir)
+
+  assert.doesNotMatch(text, /no manifest/)
+  assert.match(text, /the manifest its record names/)
+})
+
+// status is the command someone runs *because* something is wrong, so a record a truncated
+// write or a hand edit mangled is nearer its normal case than its edge case.
+test('a stream record that does not name what produced it prints no undefined', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+  await saveStream(configDir, { name: undefined })
+
+  const text = await report(configDir)
+
+  assert.doesNotMatch(text, /undefined/)
+  assert.match(text, /Remove\s+npx telstore delete/)
+})
+
+// A delete command built without a chat is the hazard --chat exists to prevent, arrived at by
+// another road: runDelete would resolve a destination from config and fire these ids at
+// whatever that turns out to be. A record that cannot say where the chunks went gets no
+// command at all.
+test('a stream record with no chat is not given a command that would guess one', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+  await saveStream(configDir, { chat: undefined })
+
+  const text = await report(configDir)
+
+  assert.doesNotMatch(text, /undefined/)
+  assert.doesNotMatch(text, /npx telstore delete/)
+  assert.match(text, /does not say which chat/)
+})
+
 // The same reason accountLine catches its own failures: one bad record must not swallow
 // the report that someone ran status to read.
 test('a record with a damaged path does not hide the backup after it', async () => {

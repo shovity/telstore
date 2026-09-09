@@ -80,6 +80,27 @@ function describeSource(state) {
   return 'a record that does not say what it was backing up'
 }
 
+// The last thing anything anywhere will say about those chunks. down.md prints a resume
+// command for a .partial "because this is the last time anything will mention that file", and
+// a stream record is the sharper case: it cannot be re-run onto — those bytes have gone past —
+// so once this record is gone nothing on this machine lists those message ids and no manifest
+// in the chat names them. Printing the command removes nothing and opens no socket; it is the
+// naming this whole listing exists for, done for something that lives on Telegram.
+//
+// The chat is named for the reason status names it: `delete` resolves its own destination from
+// config, so a command pasted later without one would fire these ids at whatever chat is
+// configured then. A record that cannot say where its chunks went gets no command rather than
+// one that would guess: `--chat` missing is not `--chat` empty, and runDelete would take it as
+// no destination at all. The id needs no guard here — the listing above measures state.id.length
+// for its own column, so a record without one never reaches this line.
+function removeCommand(state) {
+  const chat = state.chat === null || state.chat === undefined ? '' : String(state.chat).trim()
+
+  if (chat === '') return null
+
+  return `npx telstore delete ${shellArg(state.id)} --chat ${shellArg(chat)}`
+}
+
 // Only the ones actually on disk. A restore record survives a .partial that was deleted by
 // hand, and pointing at a file that is not there sends somebody looking for nothing.
 async function strandedPartials(restores) {
@@ -178,11 +199,28 @@ export async function runDown(args = [], options = {}, deps = {}) {
     log('')
     for (const { state } of uploads) log(`  ${state.id.padEnd(width)}  ${describeSource(state)}`)
 
-    if (uploads.some(({ state }) => state.kind === 'stream')) {
+    const streams = uploads.filter(({ state }) => state.kind === 'stream')
+
+    if (streams.length > 0) {
       log('')
       log('The ones marked as a command\'s output cannot be carried on at all: those bytes have')
       log('gone past, and a second run cuts them differently. Their records are the only list of')
-      log('the chunks those runs left in the chat.')
+      log('the chunks those runs left in the chat, and nothing replaces them — so this is the')
+      log('last chance to copy the commands that remove those chunks:')
+      log('')
+
+      for (const { state } of streams) {
+        const command = removeCommand(state)
+
+        if (command === null) {
+          log(`  ${state.id}`)
+          log('    this record does not say which chat its chunks went to, so there is no')
+          log('    command that could reach them')
+          continue
+        }
+
+        log(`  ${command}`)
+      }
     }
   }
 
