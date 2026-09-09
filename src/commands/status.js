@@ -4,7 +4,7 @@ import { countChunks } from '../chunking.js'
 import { describeChat } from '../chat.js'
 import { closeQuietly, connect as realConnect } from '../client.js'
 import { configFile, defaultConfigDir, loadConfig } from '../config.js'
-import { formatBytes } from '../progress.js'
+import { formatBytes, plural } from '../progress.js'
 import { assertLoggedIn } from '../session.js'
 import { resolveSettings } from '../settings.js'
 import { shellArg } from '../shell.js'
@@ -35,9 +35,25 @@ function resumeCommand(state, destination) {
   return `npx telstore ${shellArg(state.path)}${matches ? '' : ` --chat ${shellArg(state.chat)}`}`
 }
 
+// `delete` resolves its own destination from config and then fires the record's message ids
+// at whatever peer that turns out to be, so the chat is always named — where a resume command
+// above leaves --chat out when the destination already matches. The two are not the same
+// risk: a resume is the same upload again, and runUpload refuses outright to send the rest of
+// a backup somewhere else. A delete pasted a week later, or run under a --chat this report
+// was given, would destroy whatever happens to carry those ids in the chat it resolves. The
+// few characters cost nothing; leaving them out costs somebody else's messages.
+function deleteCommand(state) {
+  return `npx telstore delete ${shellArg(state.id)} --chat ${shellArg(state.chat)}`
+}
+
 // Why a resume is off the table, in the words of the thing the user would have to fix. The
 // record is keyed on the file's path, size and mtime, so any of these means runUpload would
 // hash the file to a different key, find nothing, and start a second backup instead.
+//
+// 'stream' is deliberately absent: a stream record never reaches here, because it is not an
+// unfinished transfer at all and gets its own block below. The fallback beside the lookup is
+// for the reason canResume grows next — an unnamed reason is a report that reads "not
+// possible: undefined", which is the one thing this file must never print.
 const NO_RESUME = {
   missing: 'the file is no longer there',
   changed: 'the file has changed since the backup started',
@@ -58,12 +74,14 @@ const NO_PARTIAL_RESUME = {
 // telling the user to run something that quietly starts a second backup and abandons every
 // chunk this one already sent — and those chunks are then findable only by this id, which
 // is worth saying while there are any.
-async function resumeLines(key, state, destination, done) {
-  const check = await canResume(key, state)
-
+//
+// The check is passed in rather than made here: the caller has to know a stream record before
+// it prints a File row, and asking canResume twice is how the two answers start to drift.
+function resumeLines(check, state, destination, done) {
   if (check.ok) return [field('Resume', resumeCommand(state, destination))]
 
-  const lines = [field('Resume', `not possible: ${NO_RESUME[check.reason]}.`)]
+  const reason = NO_RESUME[check.reason] ?? `the record cannot be resumed (${check.reason})`
+  const lines = [field('Resume', `not possible: ${reason}.`)]
 
   if (done > 0) {
     lines.push(
@@ -226,14 +244,30 @@ export async function runStatus(options = {}, deps = {}) {
     }
 
     const { key, state } = entry
-    const total = countChunks(state.size, state.chunkSize)
+    const resume = await canResume(key, state)
     const done = Object.keys(state.done ?? {}).length
 
     log(`  ${state.id}`)
+
+    // A stream record is not an unfinished transfer waiting to be picked up. It has no path,
+    // no length and no chunk count to be so far through — the bytes came from a command's
+    // stdout, they have gone past, and the next run cuts them differently. What it names is
+    // chunks sitting in a chat with nothing pointing at them, which is a different sentence
+    // and a different command: the only thing anyone can do with them is remove them.
+    if (resume.reason === 'stream') {
+      log(field('From', `${state.name} (a command's output)`))
+      log(field('Chunks', `${plural(done, 'chunk')} in the chat, with no manifest naming them`))
+      log(field('Chat', describeChat(state.chat)))
+      log(field('Remove', deleteCommand(state)))
+      continue
+    }
+
+    const total = countChunks(state.size, state.chunkSize)
+
     log(field('File', `${state.path}  (${formatBytes(state.size)})`))
     log(field('Chunks', `${done} of ${total} uploaded`))
     log(field('Chat', describeChat(state.chat)))
 
-    for (const line of await resumeLines(key, state, destination, done)) log(line)
+    for (const line of resumeLines(resume, state, destination, done)) log(line)
   }
 }

@@ -80,6 +80,20 @@ async function unfinished(configDir, { id = ID, done = { 0: { msgId: 500, size: 
   )
 }
 
+// The record a stream upload leaves behind when its rollback could not finish. No path — the
+// bytes came from a command's stdout — and, once the manifest has gone out, the id of the
+// card as well as the ids of the chunks.
+async function unfinishedStream(
+  configDir,
+  { id = ID, done = { 0: { msgId: 500, size: 4, sha256: 'x' } }, ...rest } = {},
+) {
+  await saveState(
+    'streamkey',
+    { v: 1, kind: 'stream', id, chat: '@store', name: 'a.tar', chunkSize: 400, done, ...rest },
+    configDir,
+  )
+}
+
 const stateFiles = async (configDir) => await fs.readdir(stateDir(configDir)).catch(() => [])
 
 // --- the order that makes an interrupted delete recoverable -------------------------
@@ -368,6 +382,67 @@ test('an unfinished backup is announced as unfinished', async () => {
 
   assert.match(out.text(), /unfinished/)
   assert.match(out.text(), /\/home\/me\/data\.tar/)
+})
+
+// A stream record carries the name the backup was given where a file record carries a path,
+// so reading only the path describes the file that is sitting right there in the record as
+// the placeholder for something nothing could say.
+test('a stream record with no manifest is described by its name, not a path it never had', async () => {
+  const configDir = await workspace()
+  await unfinishedStream(configDir)
+  const out = collect()
+
+  await runDelete(ID, { yes: true }, deps(configDir, { rec: recorder(), out }))
+
+  assert.match(out.text(), /File\s+a\.tar/)
+  assert.doesNotMatch(out.text(), /File\s+—/)
+})
+
+// --- the manifest the chat's own search did not return --------------------------------
+
+// searchManifest asks Telegram's text index, and docs/design/captions.md records that index
+// returning nothing for a channel whose documents were all plainly there, with nothing that
+// predicts when it happens. A stream run writes the id of the card it sent into its record
+// before that record can be left behind, so the one command telstore tells the user to run
+// still removes the manifest — otherwise it would advertise a backup whose chunks the same
+// run has just taken away.
+test('a manifest the chat search cannot find is removed from the record that names it', async () => {
+  const configDir = await workspace()
+  await unfinishedStream(configDir, { done: { 0: { msgId: 500 } }, manifestMsgId: 900 })
+  const rec = recorder()
+
+  await runDelete(ID, { yes: true }, deps(configDir, { rec }))
+
+  // Chunks first, manifest last, exactly as when the search did find it.
+  assert.deepEqual(rec.calls, [[500], [900]])
+  assert.deepEqual(await stateFiles(configDir), [])
+})
+
+// The manifest is the index of the ids under it, so it is not a chunk and must not be counted
+// as one: "2 chunk messages" for two chunks and a card is telstore describing the chat wrongly
+// in the one report somebody reads closely.
+test('a manifest named only by the record is not counted among the chunk messages', async () => {
+  const configDir = await workspace()
+  await unfinishedStream(configDir, { done: { 0: { msgId: 500 } }, manifestMsgId: 900 })
+  const out = collect()
+
+  const result = await runDelete(ID, { yes: true }, deps(configDir, { rec: recorder(), out }))
+
+  assert.equal(result.chunks, 1)
+  assert.equal(result.manifestDeleted, true)
+  assert.match(out.text(), /1 chunk message/)
+  assert.doesNotMatch(out.text(), /2 chunk messages/)
+})
+
+// The same rule the chunk ids get, and for the same reason: a message id names something
+// about to be destroyed for good, so a record that cannot say it exactly is refused whole.
+test('a record whose manifest id is not a message id is refused before anything is deleted', async () => {
+  const configDir = await workspace()
+  await unfinishedStream(configDir, { manifestMsgId: 0 })
+  const rec = recorder()
+
+  await assert.rejects(() => runDelete(ID, {}, deps(configDir, { rec })), /not a message id/)
+  assert.deepEqual(rec.calls, [])
 })
 
 // Telegram says nothing about an id that was already gone, so a count of ids sent is not a

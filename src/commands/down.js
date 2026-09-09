@@ -69,6 +69,17 @@ function sessionLine(config, error) {
   return 'not logged in'
 }
 
+// What an unfinished upload was of. A stream record has no path — its bytes came from a
+// command's stdout — and carries the name the backup was given instead. This listing exists
+// so that nothing goes unnamed before a recursive remove, so a row reading "undefined" is
+// the exact failure it is here to prevent.
+function describeSource(state) {
+  if (typeof state.path === 'string') return state.path
+  if (typeof state.name === 'string') return `${state.name} (a command's output)`
+
+  return 'a record that does not say what it was backing up'
+}
+
 // Only the ones actually on disk. A restore record survives a .partial that was deleted by
 // hand, and pointing at a file that is not there sends somebody looking for nothing.
 async function strandedPartials(restores) {
@@ -91,8 +102,14 @@ async function strandedPartials(restores) {
 // Everything in the directory that telstore did not put there. The whole directory goes
 // either way — it is what was asked for — but delete's rule holds here too: nothing is
 // removed unnamed.
+//
+// `tmp` is telstore's too: a stream upload borrows one chunk of disk at a time under
+// ~/.telstore rather than /tmp, which is tmpfs on many distributions and would turn a chunk
+// size into a memory limit. Naming it here would be down reporting its own working directory
+// as a stranger's file — and if a run died mid-chunk it may hold up to one chunk, which the
+// recursive remove below takes with everything else.
 async function foreignEntries(configDir) {
-  const ours = new Set(['config.json', 'config.json.tmp', 'state'])
+  const ours = new Set(['config.json', 'config.json.tmp', 'state', 'tmp'])
 
   try {
     return (await fs.readdir(configDir)).filter((name) => !ours.has(name))
@@ -159,7 +176,14 @@ export async function runDown(args = [], options = {}, deps = {}) {
     log('run carry on: without them the same file goes up again as a new backup, and the chunks')
     log('already sent stay in the chat under these ids and nothing else:')
     log('')
-    for (const { state } of uploads) log(`  ${state.id.padEnd(width)}  ${state.path}`)
+    for (const { state } of uploads) log(`  ${state.id.padEnd(width)}  ${describeSource(state)}`)
+
+    if (uploads.some(({ state }) => state.kind === 'stream')) {
+      log('')
+      log('The ones marked as a command\'s output cannot be carried on at all: those bytes have')
+      log('gone past, and a second run cuts them differently. Their records are the only list of')
+      log('the chunks those runs left in the chat.')
+    }
   }
 
   log('')

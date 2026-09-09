@@ -413,9 +413,26 @@ export async function runStreamUpload(name, childArgv, options = {}, deps = {}) 
       // stops halfway.
       sent.push(card.id)
 
-      await clearState(key, configDir)
+      // And into the record, before that record can be left behind by a rollback that could
+      // not finish. `sent` is this process's memory and dies with it; the record is what
+      // `delete` reads afterwards, and the only other way it could find this card is
+      // `findManifestMessage`, which asks Telegram's text index — docs/design/captions.md
+      // records that index returning nothing for a channel whose documents were all plainly
+      // there, and nothing predicts when it happens. A delete that cannot find the manifest
+      // takes the chunks and leaves the card behind advertising a backup restore cannot
+      // fulfil. Written after the push, for the same reason the chunk ids are: a saveState
+      // that throws must not be what hides this message from the rollback about to run.
+      state = { ...state, manifestMsgId: card.id }
+      await saveState(key, state, configDir)
 
       log(`\nDone. Restore with:\n  npx telstore restore ${id}`)
+
+      // Cleared after the closing line rather than before it, which is what gives the write
+      // above anything to protect. Writing that line is a real thing that fails — `telstore …
+      // | head` closes the pipe under telstore's feet — and it rolls the run back. A record
+      // cleared a moment earlier would leave a rollback that Telegram then refuses with the
+      // chunks and the card still in the chat and nothing on this machine naming any of them.
+      await clearState(key, configDir)
 
       return { id, chunks: count, size }
     } finally {

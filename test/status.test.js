@@ -5,7 +5,15 @@ import path from 'node:path'
 
 import { runStatus } from '../src/commands/status.js'
 import { loadConfig, saveConfig } from '../src/config.js'
-import { restoreFile, restoreKey, saveRestore, saveState, stateFile, stateKey } from '../src/state.js'
+import {
+  restoreFile,
+  restoreKey,
+  saveRestore,
+  saveState,
+  stateFile,
+  stateKey,
+  streamKey,
+} from '../src/state.js'
 
 import { LOGGED_IN, collect, tempDir } from './helpers.js'
 
@@ -325,6 +333,74 @@ test('an unresumable backup that never sent a chunk mentions no stranded chunks'
   await fs.unlink(file)
 
   assert.doesNotMatch(await report(configDir), /already in the chat/)
+})
+
+// --- a record nothing can resume ----------------------------------------------------
+
+async function saveStream(configDir, { id = 'telstore-1', ...rest } = {}) {
+  const state = {
+    v: 1,
+    kind: 'stream',
+    id,
+    chat: '@my_backups',
+    name: 'a.tar',
+    chunkSize: 40,
+    done: { 0: { msgId: 5, size: 10, sha256: 'x' } },
+    ...rest,
+  }
+
+  await saveState(streamKey(id), state, configDir)
+
+  return state
+}
+
+// A stream record is not an unfinished transfer waiting to be picked up: the bytes came from
+// a command's stdout, they have gone past, and the next run cuts them differently. What it
+// names is chunks sitting in a chat with no manifest pointing at them, which is a different
+// sentence and a different command.
+test('a stream record is leftover chunks, not an unfinished upload to resume', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+  await saveStream(configDir)
+
+  const text = await report(configDir)
+
+  assert.match(text, /a\.tar/)
+  assert.match(text, /npx telstore delete telstore-1 --chat @my_backups$/m)
+  assert.doesNotMatch(text, /npx telstore a\.tar/)
+  assert.doesNotMatch(text, /Resume/)
+})
+
+// The report used to build every row out of a path, a size and a chunk count a stream record
+// does not have: "File undefined (NaN B)", and "not possible: undefined" underneath it.
+test('a stream record is printed without an undefined path or a NaN chunk count', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+  await saveStream(configDir)
+
+  assert.doesNotMatch(await report(configDir), /undefined|NaN/)
+})
+
+// The one place status departs from its own --chat rule, and on purpose. A resume command is
+// the same upload again, which refuses to send the rest of a backup anywhere else. A delete
+// command is message ids, and runDelete resolves the chat from config: printed without
+// --chat it would fire these ids at whatever destination is configured when it is pasted,
+// destroying whatever carries them there. The chat costs a few characters; leaving it out
+// costs somebody else's messages, and nothing undoes that.
+test('the delete command names the chat even when the destination already matches', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+  await saveStream(configDir, { chat: '@my_backups' })
+
+  assert.match(await report(configDir), /--chat @my_backups/)
+})
+
+test('a chat that needs quoting is quoted so the delete command can be pasted', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+  await saveStream(configDir, { chat: 'my chat' })
+
+  assert.match(await report(configDir), /--chat 'my chat'$/m)
 })
 
 // The same reason accountLine catches its own failures: one bad record must not swallow

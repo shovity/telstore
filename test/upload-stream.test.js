@@ -646,6 +646,45 @@ test('a failure after the manifest lands takes the manifest with it', async () =
   assert.deepEqual(await findStates(id, ws.configDir), [])
 })
 
+// The record that survives a rollback nobody could finish is the only list of what is in the
+// chat on this machine, and it has to list the manifest too. `delete` would otherwise find it
+// only through Telegram's search index — the one docs/design/captions.md records returning
+// nothing for a channel whose documents were all plainly there — and the command telstore
+// prints would take the chunks away and leave the card advertising them.
+test('a rollback that cannot finish leaves the manifest id in the record, not only the chunks', async () => {
+  const ws = await workspace()
+  const client = fakeClient()
+  let id = null
+
+  await assert.rejects(
+    () =>
+      runStreamUpload(
+        'a.tar',
+        ['tar', 'cf', './a'],
+        { 'chunk-size': '10' },
+        streamDeps(client, ws, {
+          spawn: fakeSpawn([TEN, FIVE]),
+          silent: false,
+          writeErr: () => {},
+          log: (line) => {
+            if (line.startsWith('\nDone.')) throw new Error('EPIPE: broken pipe')
+          },
+          deleteMessages: async () => {
+            throw new Error('connection dropped')
+          },
+          onBackupId: (backupId) => {
+            id = backupId
+          },
+        }),
+      ),
+    /connection dropped/,
+  )
+
+  const [found] = await findStates(id, ws.configDir)
+
+  assert.equal(found.state.manifestMsgId, manifestMessages(client)[0].id)
+})
+
 // `delete` resolves its own destination from config, then fires the record's message ids at
 // whatever peer that turns out to be. A recovery command printed without --chat would, for a
 // run that used --chat, name ids belonging to one chat and delete whatever carries those ids

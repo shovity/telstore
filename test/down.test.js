@@ -5,8 +5,9 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { runDown } from '../src/commands/down.js'
+import { tempDirFor } from '../src/commands/upload-stream.js'
 import { configFile, saveConfig } from '../src/config.js'
-import { restoreKey, saveRestore, saveState, stateDir, stateKey } from '../src/state.js'
+import { restoreKey, saveRestore, saveState, stateDir, stateKey, streamKey } from '../src/state.js'
 import { LOGGED_IN, collect, tempDir } from './helpers.js'
 
 // Every test drives the question rather than a terminal: `confirm` that throws is how a test
@@ -32,6 +33,12 @@ async function gone(dir) {
 async function anUpload(configDir, { id, file, chat = 'me' }) {
   const key = stateKey(file, 10, 20)
   await saveState(key, { id, path: file, size: 10, chunkSize: 10, chat, done: {} }, configDir)
+  return key
+}
+
+async function aStream(configDir, { id, name, chat = 'me' }) {
+  const key = streamKey(id)
+  await saveState(key, { v: 1, kind: 'stream', id, name, chat, chunkSize: 10, done: {} }, configDir)
   return key
 }
 
@@ -313,4 +320,54 @@ test('down removes a state directory full of records', async () => {
 
   assert.ok(await gone(stateDir(configDir)))
   assert.ok(await gone(configDir))
+})
+
+// --- what a stream upload leaves in the directory ------------------------------------
+
+// `down` names every entry telstore did not write, so that a recursive remove takes nothing
+// unannounced. ~/.telstore/tmp is telstore's own — it is where a stream upload borrows one
+// chunk of disk at a time — so listing it under "Also there" would be down reporting its own
+// working directory as a stranger's file. tempDirFor is imported rather than the name being
+// retyped: a copy here would go on passing after the real one moved. Importing it into a
+// test is not importing it into down.js, which is what must never reach client.js.
+test('the temporary directory a stream upload borrows is not a foreign entry', async () => {
+  const configDir = await tempDir('down')
+  const out = collect()
+  await saveConfig(LOGGED_IN, configDir)
+  await fs.mkdir(tempDirFor(configDir), { recursive: true })
+
+  await runDown([], {}, { configDir, log: out.log, ...YES })
+
+  assert.doesNotMatch(out.text(), /Also there/)
+  assert.ok(await gone(configDir))
+})
+
+// A stream record has no path to print, and the ids are listed here precisely so nothing
+// goes unnamed — a row reading "undefined" is the failure this listing exists to prevent.
+test('down names a stream record by what produced it, not by a path it never had', async () => {
+  const configDir = await tempDir('down')
+  const out = collect()
+  await saveConfig(LOGGED_IN, configDir)
+  await aStream(configDir, { id: 'telstore-20260909-c0ffee', name: 'db.sql' })
+
+  await runDown([], {}, { configDir, log: out.log, ...YES })
+
+  assert.match(out.text(), /telstore-20260909-c0ffee/)
+  assert.match(out.text(), /db\.sql/)
+  assert.doesNotMatch(out.text(), /undefined/)
+})
+
+// The paragraph above the list says these records are what lets a second run carry on. That
+// is true of a file and false of a command's output: those bytes have gone past, and the
+// next run cuts them differently. Saying so is the difference between somebody re-running
+// the command and somebody expecting a resume that cannot happen.
+test('down does not offer to carry on what a command wrote', async () => {
+  const configDir = await tempDir('down')
+  const out = collect()
+  await saveConfig(LOGGED_IN, configDir)
+  await aStream(configDir, { id: 'telstore-20260909-c0ffee', name: 'db.sql' })
+
+  await runDown([], {}, { configDir, log: out.log, ...YES })
+
+  assert.match(out.text(), /cannot be carried on/)
 })

@@ -63,6 +63,44 @@ function stateMessageIds(record) {
     })
 }
 
+// The manifest a stream upload left in the chat when its rollback could not finish.
+// `searchManifest` is how delete normally finds a manifest, and it asks Telegram's text
+// index — the one docs/design/captions.md records returning nothing for a channel whose
+// documents were all plainly there, with nothing that predicts when that happens. A stream
+// run writes the id of the card it sent into its record before that record can be left
+// behind, so when the index comes up empty the record still names it. Without this, delete
+// would take the chunks away and leave the manifest advertising a backup restore cannot
+// fulfil, and nothing on this machine could ever find it again.
+//
+// Deliberately not folded into stateMessageIds: the manifest is the only index of the ids
+// under it, so it goes last (docs/design/delete.md), and counting it among them would make
+// the report say "2 chunk messages" for one chunk and a card.
+function stateManifestId(record) {
+  const msgId = record.state.manifestMsgId
+
+  if (msgId === undefined || msgId === null) return null
+
+  // The same rule the chunk ids get, for the same reason: a message id names something about
+  // to be destroyed for good, so a record that cannot say it exactly is refused whole.
+  if (!Number.isSafeInteger(msgId) || msgId < 1) {
+    throw new Error(
+      `The record of unfinished backup ${record.state.id} gives ${JSON.stringify(msgId)} as ` +
+        `the message id of its manifest, which is not a message id. ${record.file} is ` +
+        'damaged, so telstore is not deleting anything.',
+    )
+  }
+
+  return msgId
+}
+
+// A file record is keyed on a path; a stream record has none, because its bytes came from a
+// command's stdout, and carries the name the backup was given instead. Reading only the path
+// describes a backup whose name is sitting right there in the record as the placeholder for
+// something nothing could say.
+function describeRecord(state) {
+  return describeName(state?.name ?? state?.path)
+}
+
 export async function runDelete(backupId, options = {}, deps = {}) {
   const {
     connect = realConnect,
@@ -154,6 +192,11 @@ export async function runDelete(backupId, options = {}, deps = {}) {
 
     const chunkIds = [...ids]
 
+    // Where this backup's manifest is, if anywhere. The chat's own answer wins over the
+    // record's, the way it does for the chunk ids above: the record is a file on disk that a
+    // hand edit can mangle, and the message the search returned is one telstore just looked at.
+    const manifestId = manifestMessage?.id ?? (record ? stateManifestId(record) : null)
+
     if (manifest) {
       log(`Backup ${backupId}`)
       log(
@@ -161,8 +204,15 @@ export async function runDelete(backupId, options = {}, deps = {}) {
           `(${describeSize(manifest.size)}, ${plural(manifest.chunks.length, 'chunk')})`,
       )
     } else {
-      log(`Backup ${backupId} (unfinished — no manifest in the chat)`)
-      log(`File   ${describeName(record.state.path)}`)
+      // "no manifest in the chat" is a claim, and the record can contradict it: a search that
+      // returned nothing is not the same fact as a manifest that was never sent.
+      log(
+        `Backup ${backupId} (unfinished — ` +
+          (manifestId === null
+            ? 'no manifest in the chat)'
+            : 'its record names a manifest the chat search did not return)'),
+      )
+      log(`File   ${describeRecord(record.state)}`)
     }
 
     log(`From   ${describeChat(chat)}`)
@@ -170,7 +220,8 @@ export async function runDelete(backupId, options = {}, deps = {}) {
 
     const prompt = manifest
       ? `Delete this backup from ${chatName(chat)}? The chunks cannot be recovered. [y/N] `
-      : `Delete the ${plural(chunkIds.length, 'chunk message')} it sent, and its local ` +
+      : `Delete the ${plural(chunkIds.length, 'chunk message')} it sent` +
+        `${manifestId === null ? '' : ', the manifest it named'}, and its local ` +
         `record? The chunks cannot be recovered. [y/N] `
 
     if (!options.yes && !(await confirm(prompt))) {
@@ -206,9 +257,9 @@ export async function runDelete(backupId, options = {}, deps = {}) {
     // Only now. The manifest is the only index of the ids above, and where there is no
     // manifest the local record is. Anything that throws before this line leaves the way
     // back intact, and running delete again picks up where this run stopped.
-    if (manifestMessage) {
+    if (manifestId !== null) {
       try {
-        await deleteMessages(client, chat, [manifestMessage.id], {
+        await deleteMessages(client, chat, [manifestId], {
           retryOptions: { ...retryOptions, onRetry },
         })
       } catch (err) {
@@ -245,7 +296,7 @@ export async function runDelete(backupId, options = {}, deps = {}) {
       }
     }
 
-    if (manifestMessage) {
+    if (manifestId !== null) {
       log(
         `\nDone. Removed ${backupId} from ${chatName(chat)}: ` +
           `${plural(chunkIds.length, 'chunk message')} and its manifest.`,
@@ -268,7 +319,7 @@ export async function runDelete(backupId, options = {}, deps = {}) {
     return {
       id: backupId,
       chunks: chunkIds.length,
-      manifestDeleted: Boolean(manifestMessage),
+      manifestDeleted: manifestId !== null,
       stateCleared: Boolean(record),
     }
   } finally {
@@ -425,7 +476,7 @@ function listingLines(rows, chat) {
     id,
     name: manifest
       ? describeName(manifest.name)
-      : `${describeName(record?.state?.path)} (unfinished)`,
+      : `${describeRecord(record?.state)} (unfinished)`,
     size: manifest ? describeSize(manifest.size) : UNKNOWN,
     chunks: plural(countChunks(manifest, record), 'chunk'),
   }))
