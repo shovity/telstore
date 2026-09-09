@@ -7,6 +7,7 @@ import { configFile, defaultConfigDir, loadConfig } from '../config.js'
 import { formatBytes } from '../progress.js'
 import { assertLoggedIn } from '../session.js'
 import { resolveSettings } from '../settings.js'
+import { shellArg } from '../shell.js'
 import { canResume, listRestores, listStates } from '../state.js'
 
 const LABEL_WIDTH = 'Destination'.length + 2
@@ -22,16 +23,6 @@ const CONTINUATION = ' '.repeat(FIELD_WIDTH + 2)
 
 function field(label, value) {
   return `  ${label.padEnd(FIELD_WIDTH)}${value}`
-}
-
-// The Resume line is a command meant to be pasted, so anything a shell would take apart has
-// to come back quoted — a path with a space in it is the ordinary case, not an exotic one.
-const BARE_ARG = /^[A-Za-z0-9_@%+:,./-]+$/
-
-function shellArg(text) {
-  const value = String(text)
-
-  return BARE_ARG.test(value) ? value : `'${value.replaceAll("'", `'\\''`)}'`
 }
 
 // runUpload refuses to send the rest of a backup to a different chat, so the command has to
