@@ -39,7 +39,6 @@ Usage:
   npx telstore login                      Log in to Telegram, only needed once
   npx telstore <file|folder|pattern>...   Split files and upload them to Telegram
   npx telstore <name> -- <command>...     Store what a command writes, under <name>
-  npx telstore restore <id> -- <command>  Pipe a restore into a command instead of a file
   npx telstore list                       List the backups stored in the destination
   npx telstore list --search <text>       List only the backups that text appears in
   npx telstore restore <backup-id>...     Download the chunks and reassemble the files
@@ -332,10 +331,14 @@ export function route(argv) {
   // never named a command to run at all.
   if (childArgv !== null) {
     if (first !== undefined && SUBCOMMANDS.has(first)) {
+      // restore is let through rather than refused here, and the binary is what turns it away.
+      // The shape is the spec's stage 2, so the parser keeps it whole — but a refusal that
+      // says "not built yet, restore to a file and pipe that" belongs where the command runs,
+      // beside the alternative it is offering, not in an argument parser.
       if (first !== 'restore') {
         throw new Error(
-          `${first} takes no command after --. Only an upload (npx telstore a.tar -- tar cf ./a) ` +
-            'and a restore (npx telstore restore <id> -- tar x) read one.',
+          `${first} takes no command after --. An upload is what runs one ` +
+            '(npx telstore a.tar -- tar cf ./a); restoring into a command is not built yet.',
         )
       }
 

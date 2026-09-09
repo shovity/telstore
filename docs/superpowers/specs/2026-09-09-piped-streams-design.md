@@ -1,6 +1,9 @@
 # Piped sources and sinks: `telstore <name> -- <command>`
 
-Status: approved design, not yet implemented.
+Status: approved design, half built. The upload direction — `telstore <name> -- <command>` —
+is implemented as described here. The restore direction — `telstore restore <id> -- <command>`
+— is not: the parser keeps the shape, and telstore **refuses that line** with what to do
+today rather than restoring to a file and saying nothing about the command it was handed.
 
 ## The problem
 

@@ -254,6 +254,20 @@ async function main() {
     }
 
     case 'restore': {
+      // `route` keeps this shape whole because it is the spec's stage 2, and nothing here
+      // reads it yet. Restoring to a file instead would be the quiet wrong answer this project
+      // refuses everywhere else: the bytes were asked for on a command's stdin, and a file
+      // appearing in the working directory is not that — it is a different thing done
+      // confidently. So it is refused, and the refusal says what works today instead.
+      if (parsed.childArgv) {
+        throw new Error(
+          'Restoring into a command is not built yet, and telstore is not going to write a ' +
+            'file instead and call that done. Run "npx telstore restore ' +
+            `${parsed.args[0] ?? '<backup-id>'}" to get the file, then pipe it into ` +
+            `"${parsed.childArgv.join(' ')}" yourself.`,
+        )
+      }
+
       if (!parsed.args[0]) {
         throw new Error('Missing backup id. Example: npx telstore restore telstore-20260905-7f3a91')
       }
