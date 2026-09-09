@@ -21,6 +21,14 @@ test('a chunk caption keeps the backup id searchable', () => {
   assert.match(caption, /(^|\s)telstore-20260905-7f3a91(\s|$)/)
 })
 
+test('a chunk from a stream is captioned without a total nobody knows yet', () => {
+  assert.equal(chunkCaption({ id: 'telstore-1', number: 3, total: null }), '📦 telstore-1 · 3')
+})
+
+test('a chunk from a file still carries its total', () => {
+  assert.equal(chunkCaption({ id: 'telstore-1', number: 3, total: 12 }), '📦 telstore-1 · 3/12')
+})
+
 test('a manifest caption is a summary card of the whole backup', () => {
   const caption = manifestCaption({
     id: 'telstore-20260905-7f3a91',

@@ -47,6 +47,57 @@ export function renderProgress({ done, total, elapsedMs, label, width = 24, tran
   return `${label} ${bar} ${percent}% ${formatBytes(done)}/${formatBytes(total)} ${speed} ETA ${formatDuration(remaining)}`
 }
 
+// A percentage of an unknown total is an invented number, and an ETA from one is worse: it
+// would count down to a finish nobody can predict.
+export function renderStreamProgress({ done, elapsedMs, label }) {
+  const bytesPerSecond = elapsedMs > 0 ? done / (elapsedMs / 1000) : 0
+
+  return `${label} ${formatBytes(done)} sent ${formatBytes(Math.round(bytesPerSecond))}/s`
+}
+
+export function createStreamProgress({
+  label,
+  write = (line) => process.stderr.write(line),
+  now = () => Date.now(),
+  minIntervalMs = 200,
+}) {
+  const startedAt = now()
+  let done = 0
+  let currentLabel = label
+  let lastDrawnAt = startedAt
+  let widestLine = 0
+
+  // Same \r discipline as createProgress: a redraw shorter than the one before it would
+  // leave the previous line's tail on screen, so pad every line out to the widest drawn so far.
+  function draw(suffix) {
+    const line = renderStreamProgress({ done, elapsedMs: now() - startedAt, label: currentLabel })
+    widestLine = Math.max(widestLine, line.length)
+    write(`\r${line.padEnd(widestLine)}${suffix}`)
+  }
+
+  return {
+    advance(bytes) {
+      done += bytes
+      if (now() - lastDrawnAt < minIntervalMs) return
+      lastDrawnAt = now()
+      draw('')
+    },
+    setLabel(next) {
+      currentLabel = next
+      lastDrawnAt = now()
+      draw('')
+    },
+    finish() {
+      draw('\n')
+    },
+  }
+}
+
+// A number turned into words a person reads: "1 chunk" for one, "3 chunks" for the rest.
+export function plural(n, word) {
+  return `${n} ${word}${n === 1 ? '' : 's'}`
+}
+
 export function createProgress({
   total,
   label,

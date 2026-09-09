@@ -12,7 +12,7 @@ import {
 import { askConfirm } from '../confirm.js'
 import { configFile, defaultConfigDir, loadConfig } from '../config.js'
 import { manifestFileName, manifestMessageIds, parseManifestJson } from '../manifest.js'
-import { formatBytes, formatDuration } from '../progress.js'
+import { formatBytes, formatDuration, plural } from '../progress.js'
 import { assertLoggedIn } from '../session.js'
 import { requireChat, resolveSettings } from '../settings.js'
 import { clearRestore, clearState, findRestores, findStates } from '../state.js'
@@ -28,10 +28,6 @@ function describeName(name) {
 
 function describeSize(size) {
   return Number.isSafeInteger(size) && size >= 0 ? formatBytes(size) : UNKNOWN
-}
-
-function plural(n, word) {
-  return `${n} ${word}${n === 1 ? '' : 's'}`
 }
 
 // The same rule the manifest gets, for the same reason: a message id is the name of

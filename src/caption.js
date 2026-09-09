@@ -49,8 +49,13 @@ function utcMinutes(createdAt) {
   return `${new Date(createdAt).toISOString().slice(0, 16).replace('T', ' ')} UTC`
 }
 
+// A stream knows its chunk number and not its count. "3/?" would be a question mark in the
+// chat forever; the number alone is true at the time it is written, and the manifest card
+// carries the final count.
 export function chunkCaption({ id, number, total }) {
-  return `📦 ${id} · ${number}/${total}`
+  return total === null || total === undefined
+    ? `📦 ${id} · ${number}`
+    : `📦 ${id} · ${number}/${total}`
 }
 
 export function manifestCaption({ id, name, size, chunks, createdAt, note = null }) {

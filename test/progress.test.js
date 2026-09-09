@@ -1,7 +1,24 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { formatBytes, formatDuration, renderProgress, createProgress } from '../src/progress.js'
+import {
+  formatBytes,
+  formatDuration,
+  renderProgress,
+  createProgress,
+  renderStreamProgress,
+  createStreamProgress,
+} from '../src/progress.js'
+
+// The same shape createProgress's own tests fake `now` with, but counting up by a full
+// second each call so a throttle of the default 200ms is never in doubt.
+function fakeClock() {
+  let clock = -1000
+  return () => {
+    clock += 1000
+    return clock
+  }
+}
 
 test('formatBytes picks a sensible unit', () => {
   assert.equal(formatBytes(0), '0 B')
@@ -53,6 +70,25 @@ test('renderProgress reports ETA 0s at 100%', () => {
   const line = renderProgress({ done: 100, total: 100, elapsedMs: 1000, label: 'x', width: 10 })
   assert.match(line, /100%/)
   assert.match(line, /ETA 0s/)
+})
+
+test('a stream line reports what was sent and how fast, and claims no percentage', () => {
+  const line = renderStreamProgress({ done: 1024 * 1024, elapsedMs: 1000, label: 'Chunk 2' })
+  assert.match(line, /Chunk 2/)
+  assert.match(line, /1\.0 MB/)
+  assert.match(line, /\/s/)
+  assert.doesNotMatch(line, /%/)
+  assert.doesNotMatch(line, /ETA/)
+})
+
+test('a stream bar pads a shrinking line so no tail of the last one survives', () => {
+  const lines = []
+  const bar = createStreamProgress({ label: 'Chunk 1', write: (l) => lines.push(l), now: fakeClock() })
+  bar.advance(1024 * 1024 * 1024)
+  bar.setLabel('Chunk 2')
+  bar.finish()
+  const widths = lines.map((l) => l.replace(/^\r/, '').replace(/\n$/, '').length)
+  assert.ok(widths.every((w) => w === Math.max(...widths)))
 })
 
 test('createProgress coalesces updates that arrive too close together', () => {
