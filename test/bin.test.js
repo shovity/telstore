@@ -423,6 +423,13 @@ export async function connect() {
       // Slow on purpose: a signal has to be able to land between two chunks.
       await new Promise((resolve) => setTimeout(resolve, 150))
       nextId += 1
+      // More than a pipe holds, written once, so a test that never reads stdout leaves the
+      // final flush with nothing to drain into. That is the stall exitWhenFlushed waits two
+      // seconds for, and the only way to hold the window after the run open long enough to
+      // press Ctrl-C into it.
+      if (process.env.TELSTORE_TEST_STALL_STDOUT === '1' && nextId === 1001) {
+        process.stdout.write('.'.repeat(200_000))
+      }
       process.stderr.write('\\nSENT ' + nextId + '\\n')
       return { id: nextId }
     },
@@ -472,7 +479,7 @@ async function fakeTelegram() {
 // Every wait below is for something the run itself printed, so nothing here is timed against
 // a sleep: the test acts the moment the binary says it has sent a chunk or started removing
 // one, whatever the machine's speed.
-function drive(bin, args, { home, env = {} } = {}) {
+function drive(bin, args, { home, env = {}, readStdout = true } = {}) {
   const child = spawn(process.execPath, [bin, ...args], {
     env: { ...process.env, HOME: home, ...env },
   })
@@ -489,10 +496,14 @@ function drive(bin, args, { home, env = {} } = {}) {
     }
   }
 
-  child.stdout.on('data', (chunk) => {
-    out.stdout += chunk.toString()
-    arrived()
-  })
+  // Left unread on purpose when the test wants a stalled pipe: a stream nobody resumes fills
+  // up and stays full, which is the condition the assertion is about.
+  if (readStdout) {
+    child.stdout.on('data', (chunk) => {
+      out.stdout += chunk.toString()
+      arrived()
+    })
+  }
 
   child.stderr.on('data', (chunk) => {
     out.stderr += chunk.toString()
@@ -623,5 +634,37 @@ test(
     assert.equal(code, 130)
     assert.match(run.out.stderr, /run the same command again to continue/)
     assert.doesNotMatch(run.out.stderr, /DELETING/)
+  },
+)
+
+// The run is over by the time this Ctrl-C lands — the rollback finished and the arm returned —
+// and the process is only holding on for its own output to reach a pipe nobody is reading. Every
+// line the handler could otherwise reach for describes a run that is still going: a removal in
+// progress, leftovers to delete by hand, a resume for a backup that is finished.
+test(
+  'Ctrl-C after the run has settled claims nothing about a run that is over',
+  { timeout: 30_000 },
+  async () => {
+    const { bin, home } = await fakeTelegram()
+    const run = drive(bin, ['bak', ...PRODUCER], {
+      home,
+      env: { TELSTORE_TEST_STALL_STDOUT: '1' },
+      readStdout: false,
+    })
+
+    await run.until(/SENT \d+[\s\S]*SENT \d+/)
+    run.interrupt()
+
+    // The run's own last word, so the second signal is timed against what happened rather
+    // than against a clock.
+    await run.until(/Nothing this run sent was left in the chat/)
+    run.interrupt()
+
+    const code = await run.exited
+
+    assert.equal(code, 130)
+    assert.match(run.out.stderr, /\nStopped\.\n$/)
+    assert.doesNotMatch(run.out.stderr, /Leaving now/)
+    assert.doesNotMatch(run.out.stderr, /may still have chunks/)
   },
 )

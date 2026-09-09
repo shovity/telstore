@@ -29,15 +29,36 @@ let abortRun = null
 let interrupting = false
 let deadline = null
 
+// The run is over — it finished, or it unwound itself and threw. Nothing after this point is
+// something Ctrl-C can be about: the process is only waiting for its own output to flush.
+let settled = false
+
+// This process is already on its way out, and has already said why.
+let leaving = false
+
 // A batch clears each finished item's record as it goes, so by the time Ctrl-C lands these
 // are transfers no second run should touch. Ctrl-C needs their names to say so.
 const finished = []
+
+// Every exit Ctrl-C leads to comes through here. Through exitWhenFlushed rather than straight
+// to process.exit, because on a pipe stderr is asynchronous, and the line most at risk of
+// being cut in half is the one below carrying the command that removes the leftovers.
+function leave(message) {
+  // Called twice means Ctrl-C landed again while the first line was still flushing, or the
+  // deadline arrived on top of it. There is nothing more to say, and someone pressing it a
+  // second time is asking to be gone rather than read to.
+  if (leaving) process.exit(SIGINT_EXIT_CODE)
+
+  leaving = true
+  process.stderr.write(message)
+  exitWhenFlushed(SIGINT_EXIT_CODE)
+}
 
 // Said when the waiting ends without the rollback having finished — because someone pressed
 // Ctrl-C again, or because the deadline above ran out. Neither knows how far the removal got,
 // so both point at the command that finishes it by hand.
 function leaveNow() {
-  process.stderr.write(
+  leave(
     interruptMessage(currentCommand, {
       backupId: currentBackupId,
       done: finished,
@@ -46,13 +67,21 @@ function leaveNow() {
       chat: currentChat,
     }),
   )
-  process.exit(SIGINT_EXIT_CODE)
 }
 
 process.on('SIGINT', () => {
   // A passphrase prompt has stdin in raw mode, and process.exit skips readline's own cleanup.
   // Without this, Ctrl-C hands back a shell that no longer echoes what is typed into it.
   if (process.stdin.isTTY) process.stdin.setRawMode(false)
+
+  // Checked before anything else, because every message below describes a run that is still
+  // going. Said about one that has settled they are all false: a removal that is not running,
+  // leftovers that were already removed, a resume for a backup that is finished and valid.
+  // The window is real — exitWhenFlushed waits up to two seconds on a pipe nobody is reading.
+  if (settled) {
+    leave(interruptMessage(null))
+    return
+  }
 
   // A second Ctrl-C is someone saying they will not wait.
   if (interrupting) {
@@ -64,14 +93,14 @@ process.on('SIGINT', () => {
   // next run resumes onto — so there is nothing to unwind and Ctrl-C is the immediate exit it
   // has always been.
   if (!abortRun) {
-    process.stderr.write(
+    leave(
       interruptMessage(currentCommand, {
         backupId: currentBackupId,
         done: finished,
         stream: streaming,
       }),
     )
-    process.exit(SIGINT_EXIT_CODE)
+    return
   }
 
   interrupting = true
@@ -194,8 +223,9 @@ async function main() {
           process.stderr.write('\nStopped. Nothing this run sent was left in the chat.\n')
           process.exitCode = SIGINT_EXIT_CODE
         } finally {
-          // Nothing left to unwind: a Ctrl-C from here on is an ordinary immediate exit, and
-          // the deadline that was holding the process open has nothing left to wait for.
+          // Nothing left to unwind, and nothing left to say about it: whichever way the run
+          // ended, it ended. The deadline that was holding the process open goes with it.
+          settled = true
           abortRun = null
           if (deadline) clearTimeout(deadline)
         }
