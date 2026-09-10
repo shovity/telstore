@@ -199,7 +199,8 @@ export async function runRestoreStream(backupId, childArgv, options = {}, deps =
           if (!message) {
             throw new Error(
               `Missing chunk ${chunk.i + 1}/${manifest.chunks.length}: message ${chunk.msgId} ` +
-                `is no longer in ${chat}. This backup cannot be restored.`,
+                `is no longer in ${chat}. This backup cannot be restored. ` +
+                `${received(childArgv, written)}`,
             )
           }
 

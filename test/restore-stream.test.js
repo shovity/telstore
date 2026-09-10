@@ -286,18 +286,38 @@ test('a chunk whose length disagrees with the manifest is refused the same way',
   assert.deepEqual(downloaded, [backup.manifest.chunks[0].msgId])
 })
 
-test('a chunk message that is gone from the chat fails by name', async () => {
+test('a chunk message that is gone from the chat fails by name, and says what the command already has', async () => {
   const backup = fakeBackup()
   const ws = await workspace()
   const child = fakeChild()
   const { deps } = fakeChat(backup, child, ws, { hideMessageId: backup.manifest.chunks[1].msgId })
 
+  // The second chunk is the one missing here, so by the time this fires tar has already been
+  // handed a correct prefix — the shape a real deleted-chunk run hit and the message used to
+  // say nothing about. Matching only "Missing chunk" would pass even if the received() call
+  // were dropped, so the assertion pins the whole sentence.
   await assert.rejects(
     () => runRestoreStream(backup.id, ARGV, {}, deps),
-    /Missing chunk 2\/2: message 1001 is no longer in @store/,
+    /Missing chunk 2\/2: message 1001 is no longer in @store\. This backup cannot be restored\. tar had already been given 4 B, which was correct but is not the whole backup — whatever it did with that is incomplete\./,
   )
 
   assert.deepEqual(child.bytes(), backup.content.subarray(0, 4))
+})
+
+test('a chunk message gone on the first chunk fails by name, and says the command has nothing', async () => {
+  const backup = fakeBackup()
+  const ws = await workspace()
+  const child = fakeChild()
+  const { deps } = fakeChat(backup, child, ws, { hideMessageId: backup.manifest.chunks[0].msgId })
+
+  // The other half of what received() distinguishes: nothing has been handed to tar yet, so
+  // the sentence says "was given nothing" rather than naming a prefix that was never sent.
+  await assert.rejects(
+    () => runRestoreStream(backup.id, ARGV, {}, deps),
+    /Missing chunk 1\/2: message 1000 is no longer in @store\. This backup cannot be restored\. tar was given nothing\./,
+  )
+
+  assert.deepEqual(child.bytes(), Buffer.alloc(0))
 })
 
 test('a command that stops reading early fails, even though it exited 0', async () => {
