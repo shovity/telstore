@@ -1,7 +1,8 @@
 # `delete`
 
-The one command that destroys data on purpose, so the rule runs the other way: nothing
-removed that the user did not ask for, nothing reported gone that is still there.
+The command that destroys data on Telegram on purpose — `down` is the one that destroys it
+on this machine (`docs/design/down.md`) — so the rule runs the other way: nothing removed
+that the user did not ask for, nothing reported gone that is still there.
 
 - Chunks first, manifest last, local record last of all — the manifest is the only list of
   message ids, so removing it first strands every remaining chunk unnamed. Leaving it until
@@ -19,6 +20,33 @@ removed that the user did not ask for, nothing reported gone that is still there
   `withRetry` nor the stall deadline. Its peer resolution and its choice between
   `channels.DeleteMessages` and `messages.DeleteMessages` are still what telstore calls,
   because that choice is what a fake client would never catch us getting wrong.
+- **`manifestMsgId` looks like a field somebody forgot to fold into `stateMessageIds`. It is
+  not, and folding it in breaks two things at once.** It exists because a stream upload's
+  rollback can fail partway, and the usual reason it is rolling back at all is that the network
+  broke — a rollback that got as far as the chunks but not the card leaves a manifest standing
+  in the chat over nothing. `delete` normally finds a manifest through `searchManifest`, which
+  asks Telegram's text index, and this repo has *measured* that index returning nothing for a
+  channel whose documents were all plainly there, with nothing known that predicts when it
+  happens (`docs/design/captions.md`). So a stream run writes the card's message id into its own
+  record before that record can be left behind, and `stateManifestId` reads it when the search
+  comes up empty. Without it, `delete` takes the chunks away and leaves the card advertising a
+  backup `restore` cannot fulfil, findable by nothing on this machine ever again.
+
+  Why it is read by `stateManifestId` and not simply added to `stateMessageIds`, which is the
+  tidy-looking change: `stateMessageIds` fills `chunkIds`, and `chunkIds` is what goes out
+  first, so a manifest id among them would be destroyed **with** the chunks instead of after
+  them — the chunks-first, manifest-last order the first bullet of this file exists to keep,
+  given up for a field that is only ever read on the failure path. And every count in the
+  report is derived from that same list, so a manifest counted among the chunks makes each of
+  them one too high: "2 chunk messages" for one chunk and a card, in the sentence someone is
+  reading to decide whether to say yes. Two rules broken, in a path nobody exercises by hand.
+
+  `status` reads the same field to say whether a manifest is in the chat, and must answer about
+  it exactly as this does: `stateManifestId` treats an explicit `null` as an absent value, so
+  status tests `== null` rather than `=== undefined`. A record carrying a null had status
+  promising "the manifest its record names" while `delete` reported none — two commands
+  contradicting each other about one record, which is the failure this field was added to
+  prevent rather than one to introduce alongside it.
 - A delete also drops every `restore-*` record naming that backup, next to where it drops the
   upload record and for the same reason: the chunks are gone, so `status` would go on offering
   a resume command that can only fail. `findRestores` matches the id *inside* each file, like
@@ -28,3 +56,170 @@ removed that the user did not ask for, nothing reported gone that is still there
   it, and this command removes what was asked for and nothing else — the same line `pruneRestores`
   will not cross. It is named on the way out instead, because nothing can finish it now, and a
   file nobody is told about is one nobody will ever think to reclaim.
+- The card the walk meets is handed on as the raw `Api.Message`, the same thing
+  `findManifestMessage` returns, because both of them feed `readMessageBytes` and teleproto's
+  `downloadMedia` treats a non-`Api.Message` argument as media itself, matches it against no
+  `Api` class, and throws `Cannot download media of type object`. The flat document
+  `iterDocuments` yields is exactly that argument. It shipped wrong once and no fake noticed,
+  which is `docs/design/testing-blind-spots.md`'s rule in one line: the tests assert the shape
+  handed over, not the fake's willingness to take anything.
+- **`delete` reads the chat for chunks carrying the backup id, and does not take the local
+  list for what is there.** The reason it has to is dated 2026-09-09 and written up in
+  `docs/design/data-integrity.md`: a stream upload left behind by a second Ctrl-C put a chunk
+  in the chat that its own record never named, and the `delete` line that run printed removed
+  the two ids it knew about, said "Done", and left 12MB standing. Three other fixes were on
+  the table — recording each send's intent before it goes out, tearing the socket down before
+  the process leaves, and simply softening the wording — and each of them closes one escape
+  route. The walk was taken instead because it does not need the route named: a chunk in the
+  chat is found because it is in the chat, whatever put it there, including the causes nobody
+  has enumerated yet. It also picked up two orphans that were already possible and that nobody
+  had gone looking for — a file upload that dies between `sendChunk` returning and
+  `markChunkDone` writing, whose next run re-sends that chunk and strands the first copy under
+  a manifest that names only the second, and a run whose record was cleared before it held an
+  id at all, where `delete` used to answer "No backup found" over chunks that were plainly
+  there.
+- **What makes a document this backup's chunk is the file name telstore wrote on it**, through
+  `isChunkFileName`, and never the caption beside it — the rule `findManifestMessage` already
+  keeps and for the identical reason: a caption is text a person can edit and a file name is
+  not. The number after `.part` is checked and never read back. What the check is for is the
+  other direction: `<id>.partial` and `<id>.part0001.bak` are names telstore never writes but
+  a person can give a file they upload themselves, and the prefix alone would have destroyed
+  them along with the backup — the one mistake in this command that nothing undoes.
+- **Where the walk stops: every floor it has must agree, and neither of the two is trusted
+  alone.** The first draft tried them in order and stopped at whichever fired first, which
+  reads as the cheap option and is the expensive mistake — each floor has a way of sitting
+  *above* a chunk that is really there, and a floor one document too high sets the flag that
+  prints "Done".
+  - *The oldest message id this backup is known to have sent.* Needs no clock: telstore sends
+    chunk 0 first and records each id as it lands, so a record's `done` and a manifest's chunk
+    list are both prefixes of what the run actually sent, and the smallest id either names is
+    the backup's first message. Its blind spot is that both of those are files a person can
+    edit, which is why `stateMessageIds` and `manifestMessageIds` check every id's shape
+    before anything is destroyed — and a record with chunk 0 taken out of it passes both those
+    checks while lifting this floor over chunks that are still in the chat.
+  - *The day the backup id carries, less one day.* Derived from the id the user typed rather
+    than from any file, so nothing on disk can move it. Its blind spot is the other one:
+    `newBackupId` stamps that day from the clock of the machine making the backup and a
+    document's date comes from Telegram's. The day of slack is for that gap and nothing else,
+    and it is subtracted — a floor above the backup's own first message is the failure, so the
+    slack only ever has to be able to point downwards.
+  Requiring both makes each one's blind spot the other's problem: an id floor lifted by an
+  edited record is held down by the date, and a date floor lifted by a wrong clock is held
+  down by the id. What it costs is a day of the chat's own traffic, priced in the cost bullet
+  below rather than waved at here, and the alternative was writing "a hand-edited record can
+  hide chunks" into this file as though naming a hole were the same as closing one. Where only
+  one floor exists — an id telstore did not mint carries no day — it decides alone, and where
+  neither does there is only the budget.
+  - *`MAX_DELETE_DOCUMENTS`, 20000.* Its own number rather than `list`'s `MAX_LIST_DOCUMENTS`,
+    which is exactly 10000 and would stop this walk one document short of the largest backup
+    telstore makes: `MAX_CHUNKS` chunks with a manifest over them is 10,001 documents of
+    telstore's own before a single foreign one is counted.
+  Chunks the walk finds deliberately do **not** lower the floor, tempting as that is. A chunk
+  removed by hand out of the middle of a backup breaks the chain, and the next document down
+  would then be below the last one found rather than above it — a walk that stops early and
+  says nothing, which is the failure this whole entry exists to remove.
+- **The walk starts under the card when the chat search returned one.** A backup's manifest is
+  the last message its run sends, in both upload paths, so nothing of that backup is newer than
+  its own card and everything posted since belongs to somebody else. `iterDocuments` grew an
+  `offsetId` for it. Without that a delete of a year-old backup would read every document
+  posted in the chat since, a page per hundred, to find chunks that all sit under the card.
+- **Every delete walks, not only the ones a record calls a stream.** The gate would have been
+  cheap to write and it would have covered the measured case exactly, which is the argument
+  against it: the file path has its own way of stranding a chunk (above), and a rule shaped
+  around the one leak that has been seen is a rule that misses the next one.
+- **What the walk actually costs, now that the floors are ANDed.** The first draft of this
+  entry said the cost was bounded by the backup's own footprint, "because both ends of the
+  walk are the backup's own messages". That was true of the floor rule it described and is not
+  true of the one above it: the bottom of the walk is no longer the backup's first chunk. It
+  goes on past it, to the first document that is *both* at or below the oldest id this backup
+  is known to have sent *and* older than the day its id carries, less one — so the bottom is
+  whatever traffic the chat happened to carry in that day or two. The top is the card, or the
+  newest message when there is no card. So the read is the backup's own documents, one per
+  chunk, plus a day of somebody's chat, and in a chat telstore shares with people the second
+  term is the one that decides. **Nothing bounds it but `MAX_DELETE_DOCUMENTS`**, and the
+  moment that ceiling is what stopped the walk the command stops claiming the backup is gone —
+  which is the whole reason the cost is affordable: it is paid to be able to say "Done", and
+  where it runs out the word is not said. Anyone here to make `delete` faster by dropping a
+  floor is trading that sentence away, and should read the floor bullet above before doing it.
+
+  **What that costs in seconds, measured 2026-09-09 in the throwaway e2e channel.** Four
+  identical three-chunk backups were put in one chat at four depths, by uploading a hundred
+  foreign documents between each; every one of them was then deleted through the real
+  `runDelete` with the confirmation answered "no", three rounds, the four depths interleaved so
+  a slow minute could not land on one of them alone.
+
+  | documents the walk read | walk alone | whole command, in-process |
+  | --- | --- | --- |
+  | 16 | 103 / 116 / 124 ms | ~2.2 s |
+  | 120 | 321 / 371 / 387 ms | ~2.3 s |
+  | 224 | 568 / 596 / 696 ms | ~3.0 s |
+  | 328 | 792 / 800 / 813 ms | ~2.9 s |
+
+  So roughly **2.4 ms a document, or 230 ms a hundred-document page**, on top of a fixed ~2 s
+  that is the connection and the manifest download and not the walk at all. End to end as a
+  user sees it — `node bin/telstore.js delete … --yes` timed from the shell, deepest first —
+  the same four cost 4.5 s, 3.8 s, 3.6 s and 3.2 s: **1.3 s of extra wall clock for 312 extra
+  documents**. Carried to the ceiling, `MAX_DELETE_DOCUMENTS` of 20000 is about **50 seconds**
+  of reading, which is the price of the one ending that does not say "Done".
+
+  The floors were measured separately, in the same chat and the same minutes, by asking
+  `delete` about ids nothing in the chat matched: an id dated two days ahead read **1** document
+  and stopped, an id dated eight days back read all **329** and stopped only because the chat
+  ran out. Same command, same chat, three repeats each, only the day inside the id different —
+  which is the date floor doing exactly what the bullet above says it does, and the clearest
+  demonstration that the cost is a property of the chat's traffic and not of the backup.
+
+  One thing that measurement could **not** see, and it is the thing that decides the cost in
+  practice: no document in that chat was older than the date floor, so every walk ran to the
+  bottom of the chat rather than stopping at a floor. A chat younger than the backup's day plus
+  a day of slack is read whole, every time, by every `delete`. In a chat with years behind it
+  the second term is a day or two of that chat's own traffic instead — untested here, and the
+  number that would matter is documents per day, not documents in total.
+- **A batch does not walk for an id that neither the search nor a record knows.** `runDeletes`
+  asks about every id at once and before anything is destroyed, so a walk apiece would turn one
+  mistyped id in a list of five into minutes spent reading somebody's archive. It refuses as it
+  always did; what changed is that it no longer says "not found in <chat>", which after this
+  entry is a claim about a question it did not ask. It says there is no manifest, and points at
+  the single-id form that does read the chat.
+- **"Done" is a claim, and only a walk that reached a floor earns it.** A walk stopped by
+  `MAX_DELETE_DOCUMENTS` removed everything it found and cannot say what is behind it, so the
+  report drops the word and says how far it read instead — and the "no backup found" refusal
+  says the same, because "not found" over a chat nobody read to the bottom of is a statement
+  about somewhere the command never looked. Chunks the walk found that nothing on this machine
+  names are said twice: once above the question that authorises the removal, counted inside the
+  number that question quotes, and once in the closing report. Neither line is alarm — a leftover
+  chunk is what the walk was added to find, and finding one is it working.
+- The walk is now a second way to the card `manifestMsgId` was added for, since it meets the
+  manifest on the way down whenever the text index has gone quiet. The field stays anyway: it
+  is one field against a read of the chat, `status` answers from it without connecting at all,
+  and the bullet above about folding it into `stateMessageIds` is untouched by any of this.
+- **What none of this can see.** The fake client cannot produce the race that motivated it —
+  that is the whole finding — so the tests prove the walk finds a chunk the record does not
+  name, that the wording is honest, and that a delete with nothing stray behaves as it did
+  before, and nothing more.
+
+  Against a real account it has now been run, 2026-09-09, and the check it was waiting for is
+  the second-Ctrl-C stream upload repeated three times: **the race reproduced at the same rate
+  as before the fix — two of three runs left a chunk the record did not name — and in both of
+  them the printed `npx telstore delete <id> --chat <chat>` found the extra chunk by reading
+  the chat, counted it in the question it asked, removed all three, and left the chat empty by
+  a walk repeated three times.** Before the fix that same line removed two, said "Done", and
+  left 12MB standing. The wording held as written: `Also 1 chunk message of this backup that no
+  manifest and no record on this machine names, found by reading <chat>`, said once above the
+  question and once in the report.
+
+  The card the walk meets was exercised too, and only halfway honestly: the condition it exists
+  for — a text index that will not answer for documents that are plainly there — could not be
+  produced on the server that day. The index answered a fresh manifest in 0.2 s, and taking the
+  backup id out of the card's caption by hand did not hide it either, because Telegram indexes
+  the file name as well (`docs/design/captions.md` measured that first; a token that existed
+  only in a file name was found three times out of three). So `searchManifest` was made to
+  return `null` at the deps seam and everything under it left real: the walk met the card,
+  teleproto's `downloadMedia` accepted the `Api.Message` it was handed, the manifest parsed,
+  and the delete removed three chunks and the card. That is the path that shipped broken and
+  no fake noticed — it works against the real client now, under a condition that was simulated
+  rather than caused.
+
+  What remains uncovered is what neither floor bounds: a chat where the walk reaches
+  `MAX_DELETE_DOCUMENTS`, which is the one ending that does not claim to be complete and says
+  so instead.

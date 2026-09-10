@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { HELP, route, interruptMessage } from '../src/cli.js'
+import { HELP, OPTIONS, route, interruptMessage } from '../src/cli.js'
 
 test('a first argument that is not a subcommand is treated as a file to upload', () => {
   const r = route(['data.tar'])
@@ -208,6 +208,65 @@ test('a batch that has finished nothing yet reads exactly like a single upload',
   assert.equal(batch, one)
 })
 
+// A backup made from a command cannot be resumed — the bytes have gone past and the next run
+// cuts them differently — so the chunks already in the chat are chunks nothing will ever
+// point at again. The file wording promises exactly the resume this one cannot have.
+test('Ctrl-C during a stream upload does not promise a resume that cannot happen', () => {
+  const message = interruptMessage('upload', { backupId: 'telstore-1', stream: true })
+
+  assert.match(message, /cannot be resumed/)
+  assert.match(message, /removing/i)
+  assert.doesNotMatch(message, /run the same command again/i)
+})
+
+test('a second Ctrl-C leaves the id and the way to clean up by hand', () => {
+  const message = interruptMessage('upload', {
+    backupId: 'telstore-1',
+    stream: true,
+    again: true,
+    chat: '@my backups',
+  })
+
+  // The chat is named for the same reason the rollback's own recovery line names it: a later
+  // `delete` resolves its own destination from config, and firing these ids at the wrong peer
+  // destroys whatever happens to carry them there.
+  assert.match(message, /npx telstore delete telstore-1 --chat '@my backups'/)
+})
+
+// The one caller of deleteCommand's chatless branch, and until this test nothing anywhere
+// exercised it: a Ctrl-C landing before the run ever said where it was sending leaves the id,
+// which is the only part of the line worth having, rather than `--chat null` — a flag that
+// looks like a destination and would send runDelete to resolve one from config instead.
+test('a second Ctrl-C before the run named a chat prints the id and no --chat', () => {
+  const message = interruptMessage('upload', {
+    backupId: 'telstore-1',
+    stream: true,
+    again: true,
+    chat: null,
+  })
+
+  assert.match(message, /npx telstore delete telstore-1"/)
+  assert.doesNotMatch(message, /--chat/)
+  assert.doesNotMatch(message, /null|undefined/)
+})
+
+test('a stream upload interrupted before anything was sent promises nothing false', () => {
+  const message = interruptMessage('upload', { stream: true })
+
+  assert.match(message, /Stopped before anything was sent/)
+  assert.doesNotMatch(message, /undefined/)
+  assert.doesNotMatch(message, /removing/i)
+})
+
+// The stream branch is reached by a flag the file call sites never pass, and a file upload's
+// chunks are kept on purpose for the next run to resume onto.
+test('a file upload keeps its own wording when the stream branch exists', () => {
+  const message = interruptMessage('upload', { backupId: 'telstore-1' })
+
+  assert.match(message, /run the same command again/)
+  assert.doesNotMatch(message, /cannot be resumed/)
+})
+
 test('interrupting a restore before a .partial exists promises no file to resume', () => {
   const message = interruptMessage('restore')
 
@@ -326,12 +385,44 @@ test('an unquoted note leaves its remaining words as positionals', () => {
   assert.deepEqual(r.args, ['a.tar', 'accounts'])
 })
 
+// A file called `down` in the working directory is no longer uploadable as `telstore down`
+// — the same trade `list`, `status` and `token` already made — but the argument after it must
+// still arrive as an argument, so runDown can refuse it by name rather than wiping the machine.
+test('down is a subcommand, not a file to upload', () => {
+  assert.equal(route(['down']).command, 'down')
+  assert.deepEqual(route(['down']).args, [])
+  assert.deepEqual(route(['down', 'telstore-20260905-7f3a91']).args, ['telstore-20260905-7f3a91'])
+  assert.equal(route(['down', '--yes']).options.yes, true)
+})
+
 // A flag the parser accepts and the help never mentions is a feature only its author knows
-// about. This is the one test that notices when the two drift apart.
+// about. This is the one test that notices when the two drift apart — so it reads the parser's
+// own table rather than a copy of it. The copy had gone stale and could not say so: it still
+// listed `to` long after `--to` was removed, and passed anyway, because `HELP.includes('--to')`
+// is satisfied by the `--token` two lines further down. A substring is not a mention, hence the
+// word boundary; a hand-kept list is not the parser, hence Object.keys.
 test('every flag the parser accepts is named in the help', () => {
-  for (const flag of ['to', 'chunk-size', 'upload-concurrency', 'download-concurrency', 'out',
-    'note', 'limit', 'search', 'verbose', 'unset', 'yes', 'token', 'help']) {
-    assert.ok(HELP.includes(`--${flag}`), `--${flag} is missing from the help`)
+  const flags = Object.keys(OPTIONS)
+
+  assert.ok(flags.length > 0)
+
+  for (const flag of flags) {
+    assert.match(HELP, new RegExp(`--${flag}\\b`), `--${flag} is missing from the help`)
+  }
+})
+
+// The other direction, which nothing checked at all: a flag the help promises and the parser
+// refuses sends someone to a command that dies with "Unknown option". Only the flags the help
+// sets out as its own count — `--chat @elsewhere` inside a sentence is prose, not a promise.
+test('every flag the help sets out is one the parser accepts', () => {
+  const promised = new Set(
+    [...HELP.matchAll(/^ {2}(?:-\w, )?--([a-z-]+)/gm)].map((match) => match[1]),
+  )
+
+  assert.ok(promised.size > 0)
+
+  for (const flag of promised) {
+    assert.ok(flag in OPTIONS, `--${flag} is in the help and not in the parser`)
   }
 })
 
@@ -347,4 +438,65 @@ test('route reports no file after a note the shell kept whole', () => {
   assert.equal(route(['a.tar', '--note', 'ghi chu']).filesAfterNote, false)
   assert.equal(route(['not-found', '--note', 'march']).filesAfterNote, false)
   assert.equal(route(['a.tar']).filesAfterNote, false)
+})
+
+test('a name before -- is a stream upload, and the rest is the command', () => {
+  const r = route(['a.tar', '--', 'tar', 'cf', './a'])
+  assert.equal(r.command, 'upload')
+  assert.deepEqual(r.args, ['a.tar'])
+  assert.deepEqual(r.childArgv, ['tar', 'cf', './a'])
+})
+
+test('flags still belong to telstore when they come before the terminator', () => {
+  const r = route(['a.tar', '--chat', '@store', '--', 'tar', 'cf', './a'])
+  assert.equal(r.options.chat, '@store')
+  assert.deepEqual(r.childArgv, ['tar', 'cf', './a'])
+})
+
+test("the child's own flags are never read as telstore's", () => {
+  const r = route(['a.tar', '--', 'tar', '--verbose', '-C', './a'])
+  assert.deepEqual(r.childArgv, ['tar', '--verbose', '-C', './a'])
+  assert.equal(r.options.verbose, undefined)
+})
+
+test('an ordinary upload has no childArgv', () => {
+  assert.equal(route(['data.tar']).childArgv, null)
+})
+
+test('a missing name before -- is refused rather than read as the command name', () => {
+  assert.throws(() => route(['--', 'tar', 'cf', './a']), /name before --/)
+})
+
+test('two names before -- are refused: one command produces one stream', () => {
+  assert.throws(() => route(['a.tar', 'b.tar', '--', 'tar', 'c', './x']), /one name/)
+})
+
+test('a terminator with nothing after it is refused', () => {
+  assert.throws(() => route(['a.tar', '--']), /command after --/)
+})
+
+test('a negative chat id is still a chat id, not a command to run', () => {
+  const r = route(['config', 'chat', '-100123'])
+  assert.equal(r.command, 'config')
+  assert.deepEqual(r.args, ['chat', '-100123'])
+  assert.equal(r.childArgv, null)
+})
+
+test('a subcommand that cannot take a command is refused by name', () => {
+  assert.throws(() => route(['verify', 'telstore-1', '--', 'tar', 'x']), /verify/)
+})
+
+// --help asks what telstore does; it is never the mistake one of the terminator checks
+// above exists to catch, so it has to win no matter where a -- sits on the line.
+test('--help wins over every terminator check, in any of its spellings', () => {
+  assert.equal(route(['--help', '--', 'tar', 'cf', './a']).command, 'help')
+  assert.equal(route(['-h', '--', 'tar', 'cf', './a']).command, 'help')
+  assert.equal(route(['--help', '--']).command, 'help')
+})
+
+// The `help` subcommand is another spelling of the same request, so a terminator after it
+// is read the same way a terminator after --help is: as still asking for help, not as a
+// command for `help` to refuse the way `verify` and the rest do.
+test('the help subcommand wins over a terminator too', () => {
+  assert.equal(route(['help', '--', 'tar', 'cf']).command, 'help')
 })

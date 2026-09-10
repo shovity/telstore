@@ -55,6 +55,8 @@ function deps(chat, configDir, { hidden = [], failOn = [], ...extra } = {}) {
     confirm: async () => true,
     interactive: () => true,
     retryOptions: { attempts: 1 },
+    readDocuments: async function* () {},
+    writeProgress: null,
     searchManifest: async (client, peer, query) => {
       const backup = visible.find((b) => b.id === query)
       return backup ? { id: backup.manifestMsgId, fileName: manifestFileName(query) } : null
@@ -260,5 +262,30 @@ test('with no terminal to ask in, the batch stops and names the flag that goes o
 
   await assert.rejects(() => runDeletes(chat.ids, {}, d), /--yes/)
 
+  assert.deepEqual(d.calls, [])
+})
+
+// A single delete walks the chat for chunks carrying the id, and finds them where nothing on
+// this machine names them. A batch asks about every id at once, before anything is destroyed,
+// and a walk apiece would turn one mistyped id into minutes of reading somebody's archive. It
+// refuses instead — and says which of the two questions it actually asked.
+test('a batch does not walk the chat for an id nothing names, and says so', async () => {
+  const chat = fakeChat(2)
+  const configDir = await workspace()
+  const walks = []
+  const d = deps(chat, configDir, {
+    hidden: [chat.ids[1]],
+    readDocuments: async function* () {
+      walks.push(true)
+    },
+  })
+
+  await assert.rejects(() => runDeletes(chat.ids, {}, d), (err) => {
+    assert.match(err.message, /no manifest for it in @store/)
+    assert.match(err.message, /Deleting one id on its own also reads the chat/)
+    return true
+  })
+
+  assert.deepEqual(walks, [])
   assert.deepEqual(d.calls, [])
 })

@@ -1,9 +1,12 @@
 import { basename } from 'node:path'
 import { parseArgs } from 'node:util'
 
+import { deleteCommand } from './shell.js'
+
 const SUBCOMMANDS = new Set([
   'login',
   'logout',
+  'down',
   'list',
   'restore',
   'verify',
@@ -14,7 +17,7 @@ const SUBCOMMANDS = new Set([
   'help',
 ])
 
-const OPTIONS = {
+export const OPTIONS = {
   chat: { type: 'string' },
   'chunk-size': { type: 'string' },
   'upload-concurrency': { type: 'string' },
@@ -35,6 +38,7 @@ export const HELP = `telstore — split large files into chunks and store them o
 Usage:
   npx telstore login                      Log in to Telegram, only needed once
   npx telstore <file|folder|pattern>...   Split files and upload them to Telegram
+  npx telstore <name> -- <command>...     Store what a command writes, under <name>
   npx telstore list                       List the backups stored in the destination
   npx telstore list --search <text>       List only the backups that text appears in
   npx telstore restore <backup-id>...     Download the chunks and reassemble the files
@@ -43,6 +47,7 @@ Usage:
   npx telstore status                     Show the account, the destination and unfinished uploads and restores
   npx telstore config                     Show every setting and where its value comes from
   npx telstore logout                     Remove the saved session
+  npx telstore down                       Remove everything telstore keeps on this machine
 
 Running on a machine you do not trust:
   npx telstore token                      Print a session token for another machine
@@ -53,6 +58,22 @@ backup. A folder means the files one level inside it, and a pattern means the na
 — the shell usually expands those itself, so quote one to hand it to telstore intact. More than
 one file is listed and confirmed before the first byte goes out. Run telstore again with only
 the files that are left to carry on after an interruption.
+
+A name followed by -- makes the backup out of what a command writes, so nothing has to be on
+disk first: npx telstore a.tar -- tar cf ./a. The manifest goes out only if that command's
+output ended and the command exited 0 — an end after a crash looks exactly like an end after
+success, and running the command is how telstore tells them apart. A backup made this way
+cannot be resumed, so a run that fails, and a Ctrl-C, remove the chunks already sent rather
+than keeping them for a second run there will never be. No shell stands in between: a pipeline
+goes in as -- bash -c 'set -o pipefail; ...', which is also where compression or encryption
+belongs. The pipefail is not decoration — a shell reports the last command's exit status, so
+without it a producer that dies halfway through a pipeline still exits 0 and the manifest goes
+out for a truncated backup.
+
+down is logout taken all the way: it removes ~/.telstore entirely — the session, the api_id
+and api_hash, every setting and every resume record — and asks once before it does. It opens
+no connection and deletes nothing from Telegram: the backups stay in the chat, and the session
+stays alive on Telegram's side until you terminate it under Settings → Devices.
 
 restore, verify and delete take several ids the same way: one connection, one line each, and
 an exit code that reports any that failed. delete shows everything it is about to destroy and
@@ -96,7 +117,8 @@ Options apply to one run and are never saved. Use config to change a setting for
                               purpose: a token written on the command line would sit in
                               "ps" for the whole life of the command, and stay in that
                               machine's shell history afterwards.
-  --yes                       Upload a batch, or delete, without being asked to confirm.
+  --yes                       Upload a batch, delete, or wipe this machine with down,
+                              without being asked to confirm.
   --verbose                   Show Telegram connection logs for this run.
   -h, --help                  Show this help.
 `
@@ -105,7 +127,43 @@ Options apply to one run and are never saved. Use config to change a setting for
 // finished chunk to a state file, restore has not. Naming the backup matters because the
 // id is what `status` lists and what a later `restore` needs — the chunks are already in
 // the chat under that id, whether or not this run ever finishes.
-export function interruptMessage(command, { backupId, done = [] } = {}) {
+export function interruptMessage(
+  command,
+  { backupId, done = [], stream = false, again = false, chat = null } = {},
+) {
+  // A backup made from a command is the one upload Ctrl-C cannot leave where it is. The bytes
+  // have gone past and the next run cuts them differently, so a chunk already in the chat is
+  // a chunk no manifest will ever name — which is why this run is asked to remove them and
+  // the process waits, rather than promising the resume the file wording promises.
+  if (command === 'upload' && stream) {
+    // Nothing is in the chat until there is an id to put it under, and a run stopped before
+    // that has nothing for anyone to clean up.
+    if (!backupId) {
+      return '\nStopped before anything was sent.\n'
+    }
+
+    if (again) {
+      // "may still" because this is said while the removal is halfway through and nobody
+      // knows how far it got. `deleteCommand` is what names the chat, and why: a later
+      // `delete` resolves its destination from config, and these ids fired at the wrong peer
+      // destroy whatever happens to carry them there. A null chat here is a Ctrl-C that
+      // landed before the run said where it was sending — the chatless branch documented
+      // beside that function is for exactly this caller.
+      const removal = deleteCommand(backupId, chat)
+
+      return (
+        `\nLeaving now. Backup ${backupId} may still have chunks in the chat with no manifest ` +
+        `pointing at them — run "${removal}" to remove them.\n`
+      )
+    }
+
+    return (
+      `\nStopping. Backup ${backupId} was made from a command and cannot be resumed, so ` +
+      'telstore is removing the chunks it already sent. This takes a moment — press Ctrl-C ' +
+      'again to leave now and clean up by hand.\n'
+    )
+  }
+
   if (command === 'upload') {
     const backup = backupId ? `Backup ${backupId} is saved` : 'Progress is saved'
 
@@ -179,6 +237,18 @@ export function interruptMessage(command, { backupId, done = [] } = {}) {
   return '\nStopped.\n'
 }
 
+// The one `--` this file did not write. protectNegativeChatIds, below, inserts one of its
+// own to rescue a negative chat id from parseArgs, so the position has to be taken off the
+// argv as typed — afterwards the two are indistinguishable, and `config chat -100123` would
+// become a command telstore tries to run.
+function splitAtTerminator(argv) {
+  const at = argv.indexOf('--')
+
+  if (at === -1) return { head: argv, childArgv: null }
+
+  return { head: argv.slice(0, at), childArgv: argv.slice(at + 1) }
+}
+
 // A channel id is negative, and typing it separated by a space is the natural reflex — but
 // parseArgs rejects anything starting with a dash as an option, and reports it as one:
 // `config chat -100123` fails with "Unknown option '-1'", naming a flag nobody typed.
@@ -234,8 +304,10 @@ function filesNamedAfterNote(tokens) {
 }
 
 export function route(argv) {
+  const { head, childArgv } = splitAtTerminator(argv)
+
   const { values, positionals, tokens } = parseArgs({
-    args: protectNegativeChatIds(argv),
+    args: protectNegativeChatIds(head),
     options: OPTIONS,
     allowPositionals: true,
     tokens: true,
@@ -244,26 +316,77 @@ export function route(argv) {
   const [first, ...rest] = positionals
   const filesAfterNote = filesNamedAfterNote(tokens)
 
+  // --help (or -h, or the `help` subcommand) always wins, terminator or not: someone typing
+  // `telstore --help -- tar cf ./a` is asking what telstore does, not making a mistake for
+  // one of the checks below to catch.
+  if (values.help || first === 'help') {
+    return { command: 'help', args: [], options: values, filesAfterNote, childArgv }
+  }
+
+  if (childArgv !== null && childArgv.length === 0) {
+    throw new Error(
+      'Missing the command after --: telstore has nothing to run and store. ' +
+        'Example: npx telstore a.tar -- tar cf ./a',
+    )
+  }
+
+  // A terminator changes what "no name" and "which command" mean, so it is read before the
+  // ordinary help/chat fallbacks get a chance to answer for it — those apply to a line that
+  // never named a command to run at all.
+  if (childArgv !== null) {
+    if (first !== undefined && SUBCOMMANDS.has(first)) {
+      // restore is let through rather than refused here, and the binary is what turns it away.
+      // The shape is the spec's stage 2, so the parser keeps it whole — but a refusal that
+      // says "not built yet, restore to a file and pipe that" belongs where the command runs,
+      // beside the alternative it is offering, not in an argument parser.
+      if (first !== 'restore') {
+        throw new Error(
+          `${first} takes no command after --. An upload is what runs one ` +
+            '(npx telstore a.tar -- tar cf ./a); restoring into a command is not built yet.',
+        )
+      }
+
+      return { command: first, args: rest, options: values, filesAfterNote, childArgv }
+    }
+
+    if (positionals.length === 0) {
+      throw new Error(
+        'Missing a name before --. telstore stores what the command writes under a name you ' +
+          'choose, and there is nothing to take one from. Example: npx telstore a.tar -- tar cf ./a',
+      )
+    }
+
+    if (positionals.length > 1) {
+      throw new Error(
+        `One command produces one stream, so telstore takes one name before -- and got ` +
+          `${positionals.length}: ${positionals.join(', ')}. Run telstore once per backup.`,
+      )
+    }
+
+    return { command: 'upload', args: positionals, options: values, filesAfterNote, childArgv }
+  }
+
   // `telstore --chat @chan` with no file used to mean "remember this destination". Flags no
   // longer write anything, so that line now asks for a run that has nothing to upload —
   // say where the destination actually lives instead of printing help at someone who was
-  // perfectly clear about what they wanted.
-  if (first === undefined && values.chat && !values.help) {
+  // perfectly clear about what they wanted. (values.help already returned above, so reaching
+  // here means it was never set.)
+  if (first === undefined && values.chat) {
     throw new Error(
       `Nothing to upload. To change the destination for good, run "npx telstore config chat ${values.chat}". ` +
         'To use it for one run, pass --chat alongside a file or a command.',
     )
   }
 
-  if (values.help || first === undefined || first === 'help') {
-    return { command: 'help', args: [], options: values, filesAfterNote }
+  if (first === undefined) {
+    return { command: 'help', args: [], options: values, filesAfterNote, childArgv }
   }
 
   if (SUBCOMMANDS.has(first)) {
-    return { command: first, args: rest, options: values, filesAfterNote }
+    return { command: first, args: rest, options: values, filesAfterNote, childArgv }
   }
 
   // Every positional, not just the first: `telstore a b c` used to upload `a` and drop the
   // rest without a word, which is the one thing this project never does.
-  return { command: 'upload', args: positionals, options: values, filesAfterNote }
+  return { command: 'upload', args: positionals, options: values, filesAfterNote, childArgv }
 }

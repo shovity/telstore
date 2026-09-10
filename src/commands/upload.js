@@ -34,12 +34,40 @@ import {
 import { uploadRange } from '../uploader.js'
 
 // Above this threshold the wait must be spelled out, per spec §8.
-const LONG_WAIT_MS = 60_000
+export const LONG_WAIT_MS = 60_000
 
 // A transient error that resolves itself on the next try is not news, and one line per
 // occurrence buries the progress bar in a wall of text. Stay quiet until the third retry:
 // by then the trouble has outlived two backoffs and is worth saying out loud.
-const ANNOUNCE_AFTER_ATTEMPT = 3
+export const ANNOUNCE_AFTER_ATTEMPT = 3
+
+// Retries and FLOOD_WAIT must be announced: a silent FLOOD_WAIT_3600 leaves the user
+// staring at a frozen progress bar for an hour, assuming the process has hung.
+//
+// Exported because a stream upload waits on the same Telegram and has to say the same
+// things about it. Two copies of this wording would drift, and the one that drifted would
+// be the one nobody was reading at the time.
+export function createOnRetry(warn) {
+  return function onRetry(err, attempt, delayMs, elapsedMs = 0) {
+    if (delayMs > LONG_WAIT_MS) {
+      warn(
+        `\nTelegram wants ${formatDuration(delayMs / 1000)} of waiting before the next send ` +
+          `(${err.message}). telstore is waiting and will carry on by itself, leave it running.\n`,
+      )
+      return
+    }
+
+    // The exception to staying quiet: an attempt that took a minute to fail spent that
+    // minute with the bar frozen, which is exactly what a hang looks like. Those are worth
+    // a line the first time, whatever the attempt number.
+    if (attempt < ANNOUNCE_AFTER_ATTEMPT && elapsedMs < LONG_WAIT_MS) return
+
+    warn(
+      `\nTemporary error (${err.message}), retry ${attempt} in ` +
+        `${formatDuration(delayMs / 1000)}.\n`,
+    )
+  }
+}
 
 // Chunks and manifests differ only in where the bytes come from. Everything Telegram is
 // told about them — document, not preview; this exact file name — is decided once.
@@ -52,11 +80,15 @@ async function sendDocument(client, peer, { file, fileName, caption }) {
   })
 }
 
-async function realSendChunk(client, peer, { inputFile, fileName, caption }) {
+// The defaults behind runUpload's `sendChunk` and `sendManifest` deps. Exported because a
+// stream upload sends the same two kinds of document to the same Telegram, and a second copy
+// of "document, not preview; this exact file name" is how the two start disagreeing about
+// what telstore actually put in the chat.
+export async function realSendChunk(client, peer, { inputFile, fileName, caption }) {
   return await sendDocument(client, peer, { file: inputFile, fileName, caption })
 }
 
-async function realSendManifest(client, peer, { bytes, fileName, caption }) {
+export async function realSendManifest(client, peer, { bytes, fileName, caption }) {
   return await sendDocument(client, peer, {
     file: new CustomFile(fileName, bytes.length, '', bytes),
     fileName,
@@ -224,27 +256,7 @@ export async function runUpload(filePath, options = {}, deps = {}) {
   const log = silent ? () => {} : writeLog
   const warn = silent ? () => {} : writeErr
 
-  // Retries and FLOOD_WAIT must be announced: a silent FLOOD_WAIT_3600 leaves the user
-  // staring at a frozen progress bar for an hour, assuming the process has hung.
-  function onRetry(err, attempt, delayMs, elapsedMs = 0) {
-    if (delayMs > LONG_WAIT_MS) {
-      warn(
-        `\nTelegram wants ${formatDuration(delayMs / 1000)} of waiting before the next send ` +
-          `(${err.message}). telstore is waiting and will carry on by itself, leave it running.\n`,
-      )
-      return
-    }
-
-    // The exception to staying quiet: an attempt that took a minute to fail spent that
-    // minute with the bar frozen, which is exactly what a hang looks like. Those are worth
-    // a line the first time, whatever the attempt number.
-    if (attempt < ANNOUNCE_AFTER_ATTEMPT && elapsedMs < LONG_WAIT_MS) return
-
-    warn(
-      `\nTemporary error (${err.message}), retry ${attempt} in ` +
-        `${formatDuration(delayMs / 1000)}.\n`,
-    )
-  }
+  const onRetry = createOnRetry(warn)
 
   log(`Backup ${state.id}`)
   log(`File   ${absPath} (${formatBytes(stat.size)}, ${chunks.length} chunks)`)

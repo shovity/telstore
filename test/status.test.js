@@ -5,7 +5,16 @@ import path from 'node:path'
 
 import { runStatus } from '../src/commands/status.js'
 import { loadConfig, saveConfig } from '../src/config.js'
-import { restoreFile, restoreKey, saveRestore, saveState, stateFile, stateKey } from '../src/state.js'
+import {
+  restoreFile,
+  restoreKey,
+  saveRestore,
+  saveState,
+  stateFile,
+  stateKey,
+  streamKey,
+  tempDirFor,
+} from '../src/state.js'
 
 import { LOGGED_IN, collect, tempDir } from './helpers.js'
 
@@ -327,6 +336,133 @@ test('an unresumable backup that never sent a chunk mentions no stranded chunks'
   assert.doesNotMatch(await report(configDir), /already in the chat/)
 })
 
+// --- a record nothing can resume ----------------------------------------------------
+
+async function saveStream(configDir, { id = 'telstore-1', ...rest } = {}) {
+  const state = {
+    v: 1,
+    kind: 'stream',
+    id,
+    chat: '@my_backups',
+    name: 'a.tar',
+    chunkSize: 40,
+    done: { 0: { msgId: 5, size: 10, sha256: 'x' } },
+    ...rest,
+  }
+
+  await saveState(streamKey(id), state, configDir)
+
+  return state
+}
+
+// A stream record is not an unfinished transfer waiting to be picked up: the bytes came from
+// a command's stdout, they have gone past, and the next run cuts them differently. What it
+// names is chunks sitting in a chat with no manifest pointing at them, which is a different
+// sentence and a different command.
+test('a stream record is leftover chunks, not an unfinished upload to resume', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+  await saveStream(configDir)
+
+  const text = await report(configDir)
+
+  assert.match(text, /a\.tar/)
+  assert.match(text, /npx telstore delete telstore-1 --chat @my_backups$/m)
+  assert.doesNotMatch(text, /npx telstore a\.tar/)
+  assert.doesNotMatch(text, /Resume/)
+})
+
+// The report used to build every row out of a path, a size and a chunk count a stream record
+// does not have: "File undefined (NaN B)", and "not possible: undefined" underneath it.
+test('a stream record is printed without an undefined path or a NaN chunk count', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+  await saveStream(configDir)
+
+  assert.doesNotMatch(await report(configDir), /undefined|NaN/)
+})
+
+// The one place status departs from its own --chat rule, and on purpose. A resume command is
+// the same upload again, which refuses to send the rest of a backup anywhere else. A delete
+// command is message ids, and runDelete resolves the chat from config: printed without
+// --chat it would fire these ids at whatever destination is configured when it is pasted,
+// destroying whatever carries them there. The chat costs a few characters; leaving it out
+// costs somebody else's messages, and nothing undoes that.
+test('the delete command names the chat even when the destination already matches', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+  await saveStream(configDir, { chat: '@my_backups' })
+
+  assert.match(await report(configDir), /--chat @my_backups/)
+})
+
+test('a chat that needs quoting is quoted so the delete command can be pasted', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+  await saveStream(configDir, { chat: 'my chat' })
+
+  assert.match(await report(configDir), /--chat 'my chat'$/m)
+})
+
+// The record delete reads a manifest id out of is exactly the record a failed rollback leaves
+// behind, so "with no manifest naming them" is a claim its own record can contradict — the
+// same claim delete guards where it says a search returned nothing rather than that nothing
+// was sent. status asks Telegram nothing here, so it reports what the record says and says
+// that is what it is.
+test('a stream record whose manifest went out is not said to have none', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+  await saveStream(configDir, { manifestMsgId: 900 })
+
+  const text = await report(configDir)
+
+  assert.doesNotMatch(text, /no manifest/)
+  assert.match(text, /the manifest its record names/)
+})
+
+// delete's stateManifestId reads the same field and treats null exactly as absent, so a
+// record carrying an explicit null must not have status promising a manifest that delete
+// then reports finding no record of. One record, one answer, whichever command is asked.
+test('a stream record whose manifest id is null is described as having none', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+  await saveStream(configDir, { manifestMsgId: null })
+
+  const text = await report(configDir)
+
+  assert.match(text, /with no manifest naming them/)
+  assert.doesNotMatch(text, /the manifest its record names/)
+})
+
+// status is the command someone runs *because* something is wrong, so a record a truncated
+// write or a hand edit mangled is nearer its normal case than its edge case.
+test('a stream record that does not name what produced it prints no undefined', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+  await saveStream(configDir, { name: undefined })
+
+  const text = await report(configDir)
+
+  assert.doesNotMatch(text, /undefined/)
+  assert.match(text, /Remove\s+npx telstore delete/)
+})
+
+// A delete command built without a chat is the hazard --chat exists to prevent, arrived at by
+// another road: runDelete would resolve a destination from config and fire these ids at
+// whatever that turns out to be. A record that cannot say where the chunks went gets no
+// command at all.
+test('a stream record with no chat is not given a command that would guess one', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+  await saveStream(configDir, { chat: undefined })
+
+  const text = await report(configDir)
+
+  assert.doesNotMatch(text, /undefined/)
+  assert.doesNotMatch(text, /npx telstore delete/)
+  assert.match(text, /does not say which chat/)
+})
+
 // The same reason accountLine catches its own failures: one bad record must not swallow
 // the report that someone ran status to read.
 test('a record with a damaged path does not hide the backup after it', async () => {
@@ -646,4 +782,123 @@ test('a restore record with a damaged size does not take the report down', async
 
   assert.match(out.text(), /Sho \(@shovity\)/)
   assert.match(out.text(), /1 restore/)
+})
+
+
+async function saveTempChunk(configDir, name, bytes) {
+  const tmp = tempDirFor(configDir)
+
+  await fs.mkdir(tmp, { recursive: true })
+  await fs.writeFile(path.join(tmp, name), Buffer.alloc(bytes))
+
+  return path.join(tmp, name)
+}
+
+// Measured in the e2e channel on 2026-09-09 and this is the exact shape of it: three runs
+// stopped with a second Ctrl-C, the printed `delete` run for each, and then a machine holding
+// 37MB of buffered chunks under a report that said "Unfinished none" and stopped there. The
+// records are gone by then, so this is the only thing left that can mention those files.
+test('buffered chunks are named even when nothing is unfinished', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+  const file = await saveTempChunk(configDir, 'telstore-20260909-94ebc5-2.chunk', 2048)
+
+  const text = await report(configDir)
+
+  assert.match(text, /Unfinished\s+none/)
+  assert.match(text, /telstore-20260909-94ebc5-2\.chunk/)
+  assert.match(text, /1 chunk file, 2\.0 KB in all/)
+  assert.match(text, new RegExp(`rm ${file}`))
+})
+
+// The early return that ended the report when nothing was unfinished is what hid these files
+// for a whole branch, so the case with records in it is worth its own test: a report that
+// mentions them only on an empty machine is a report that mentions them almost never.
+test('buffered chunks are named alongside the records too', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+  await saveStream(configDir)
+  await saveTempChunk(configDir, 'telstore-1-3.chunk', 1024)
+
+  const text = await report(configDir)
+
+  assert.match(text, /telstore-1-3\.chunk/)
+  assert.match(text, /npx telstore delete telstore-1/)
+})
+
+// A machine that has never run a backup from a command has no such directory, and inventing a
+// heading for it would turn "nothing is wrong" into something to read about.
+test('a machine with no buffered chunks says nothing about them', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+
+  assert.doesNotMatch(await report(configDir), /chunk file/)
+})
+
+// The total is what someone decides by, so a file that could not be measured must not be
+// quietly counted as nothing.
+test('a total that leaves a file out says it is a floor', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+  await saveTempChunk(configDir, 'telstore-1-0.chunk', 1024)
+  const tmp = tempDirFor(configDir)
+  await fs.symlink(path.join(tmp, 'nowhere'), path.join(tmp, 'telstore-1-1.chunk'))
+
+  const text = await report(configDir)
+
+  assert.match(text, /at least 1\.0 KB in all/)
+  assert.match(text, /telstore-1-1\.chunk\s+size unknown/)
+})
+
+// And status says so in one line with the rest of the report still around it, the same way a
+// settings row that will not parse is loud in its own row rather than fatal. Reporting it as
+// nothing would be status promising a clean machine it never looked at.
+test('a tmp directory that cannot be read is named, and does not stop the report', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+  await fs.writeFile(tempDirFor(configDir), 'not a directory')
+
+  const text = await report(configDir)
+
+  assert.match(text, /Sho \(@shovity\)/)
+  assert.match(text, new RegExp(`${tempDirFor(configDir)} could not be read`))
+  assert.match(text, /holding up to a whole chunk/)
+})
+
+// The early return this task removed, one layer up: the temp listing prints last, so anything
+// that stops short of it takes it with it. `telstore status | head` is the reachable version —
+// the pipe closes under a write partway down a record block — and a damaged record that learns
+// to throw later would be the other. Either way one bad record must not hide 1.8GB of disk.
+test('a record block that dies mid-print does not take the buffered chunks with it', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+  await saveStream(configDir)
+  await saveTempChunk(configDir, 'telstore-1-3.chunk', 1024)
+
+  const lines = []
+
+  await assert.rejects(
+    () =>
+      runStatus(
+        {},
+        {
+          configDir,
+          connect: async () => fakeClient(),
+          disconnect: async () => {},
+          log: (line) => {
+            // The write that fails is the record's own heading, which is the first thing the
+            // block prints — so nothing of the listing below it is reached either.
+            if (line.includes('telstore-1') && !line.includes('.chunk')) {
+              throw new Error('EPIPE: broken pipe')
+            }
+
+            lines.push(line)
+          },
+        },
+      ),
+    /broken pipe/,
+  )
+
+  assert.match(lines.join('\n'), /telstore-1-3\.chunk/)
+  assert.match(lines.join('\n'), /rm /)
 })

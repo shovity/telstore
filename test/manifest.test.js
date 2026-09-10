@@ -2,6 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  backupIdDay,
+  isChunkFileName,
   newBackupId,
   chunkFileName,
   manifestFileName,
@@ -270,4 +272,83 @@ test('parseManifest refuses a note that is not text', () => {
   const manifest = { ...sampleManifest(), note: { was: 'an object' } }
 
   assert.throws(() => parseManifest(serializeManifest(manifest)), /note/)
+})
+
+// --- recognising a backup's own documents in a chat --------------------------------------
+
+// delete walks the chat to find chunks nothing on this machine names, and the only thing
+// that says which backup a document belongs to is the file name telstore wrote on it. A
+// reader that disagreed with the writer by one character would find nothing at all.
+test('isChunkFileName accepts every name chunkFileName writes', () => {
+  const id = 'telstore-20260905-7f3a91'
+
+  for (const i of [0, 1, 9, 99, 998, 9999, 12345]) {
+    assert.equal(isChunkFileName(id, chunkFileName(id, i)), true, `chunk ${i}`)
+  }
+})
+
+test('isChunkFileName does not take a manifest for a chunk', () => {
+  const id = 'telstore-20260905-7f3a91'
+
+  assert.equal(isChunkFileName(id, manifestFileName(id)), false)
+})
+
+// The names below are ones telstore never writes, and every one of them would be destroyed
+// with the backup if the prefix alone decided. A person uploads what they like into their
+// own chat, and `<id>.partial` is a name this project itself uses for something else.
+test('isChunkFileName refuses a name that only starts like a chunk', () => {
+  const id = 'telstore-20260905-7f3a91'
+
+  for (const name of [
+    `${id}.partial`,
+    `${id}.part`,
+    `${id}.part0001.bak`,
+    `${id}.part 1`,
+    `${id}.part-1`,
+    `${id}.manifest.json`,
+    id,
+  ]) {
+    assert.equal(isChunkFileName(id, name), false, name)
+  }
+})
+
+test('isChunkFileName does not claim another backup\'s chunk', () => {
+  const mine = 'telstore-20260905-7f3a91'
+  const theirs = 'telstore-20260905-000000'
+
+  assert.equal(isChunkFileName(mine, chunkFileName(theirs, 0)), false)
+})
+
+// A document Telegram hands over with no file name at all — a photo, a message that is not a
+// document — must not throw its way out of a walk that is looking for chunks.
+test('isChunkFileName answers no for a name that is not a string', () => {
+  const id = 'telstore-20260905-7f3a91'
+
+  for (const name of [null, undefined, 12, {}]) assert.equal(isChunkFileName(id, name), false)
+})
+
+// --- the day a backup id carries ---------------------------------------------------------
+
+test('backupIdDay reads the day out of a backup id as the UTC second it began', () => {
+  assert.equal(backupIdDay('telstore-20260905-7f3a91'), Date.UTC(2026, 8, 5) / 1000)
+})
+
+// The one reader of this uses it as a floor for a walk of somebody's chat, so a date that
+// rolls over into next year would read as a floor above everything there and stop the walk
+// before it started — an early stop nobody would ever see.
+test('backupIdDay refuses a date that does not exist rather than rolling it over', () => {
+  assert.equal(backupIdDay('telstore-20261345-7f3a91'), null)
+  assert.equal(backupIdDay('telstore-20260231-7f3a91'), null)
+})
+
+test('backupIdDay refuses an id telstore did not mint', () => {
+  for (const id of ['backup-1', 'telstore-2026-7f3a91', 'telstore-20260905', '']) {
+    assert.equal(backupIdDay(id), null, id)
+  }
+})
+
+test('backupIdDay reads the id newBackupId writes', () => {
+  const at = new Date(Date.UTC(2026, 8, 5, 13, 20))
+
+  assert.equal(backupIdDay(newBackupId(at, () => 'abc123')), Date.UTC(2026, 8, 5) / 1000)
 })

@@ -47,6 +47,57 @@ export function renderProgress({ done, total, elapsedMs, label, width = 24, tran
   return `${label} ${bar} ${percent}% ${formatBytes(done)}/${formatBytes(total)} ${speed} ETA ${formatDuration(remaining)}`
 }
 
+// A percentage of an unknown total is an invented number, and an ETA from one is worse: it
+// would count down to a finish nobody can predict.
+export function renderStreamProgress({ done, elapsedMs, label }) {
+  const bytesPerSecond = elapsedMs > 0 ? done / (elapsedMs / 1000) : 0
+
+  return `${label} ${formatBytes(done)} sent ${formatBytes(Math.round(bytesPerSecond))}/s`
+}
+
+export function createStreamProgress({
+  label,
+  write = (line) => process.stderr.write(line),
+  now = () => Date.now(),
+  minIntervalMs = 200,
+}) {
+  const startedAt = now()
+  let done = 0
+  let currentLabel = label
+  let lastDrawnAt = startedAt
+  let widestLine = 0
+
+  // Same \r discipline as createProgress: a redraw shorter than the one before it would
+  // leave the previous line's tail on screen, so pad every line out to the widest drawn so far.
+  function draw(suffix) {
+    const line = renderStreamProgress({ done, elapsedMs: now() - startedAt, label: currentLabel })
+    widestLine = Math.max(widestLine, line.length)
+    write(`\r${line.padEnd(widestLine)}${suffix}`)
+  }
+
+  return {
+    advance(bytes) {
+      done += bytes
+      if (now() - lastDrawnAt < minIntervalMs) return
+      lastDrawnAt = now()
+      draw('')
+    },
+    setLabel(next) {
+      currentLabel = next
+      lastDrawnAt = now()
+      draw('')
+    },
+    finish() {
+      draw('\n')
+    },
+  }
+}
+
+// A number turned into words a person reads: "1 chunk" for one, "3 chunks" for the rest.
+export function plural(n, word) {
+  return `${n} ${word}${n === 1 ? '' : 's'}`
+}
+
 export function createProgress({
   total,
   label,
@@ -96,6 +147,41 @@ export function createProgress({
     },
     finish() {
       draw('\n')
+    },
+  }
+}
+
+// A walk of one page is over in about the time it takes to notice — 165ms against a real
+// chat — and that is the usual case, so nothing is drawn for the first stretch: a line that
+// appears and is wiped in the same breath is a flicker, not information. Past that the read
+// is long enough that silence reads as the hang this project refuses everywhere else.
+//
+// \r only moves the cursor home, so every line is padded to the widest one drawn and the last
+// write wipes the row: whatever the command prints next must never land on half a notice.
+//
+// Here rather than beside either caller: `list` walks a chat to find backups and `delete`
+// walks it to find chunks nothing on this machine names, and two copies of "when is a read
+// long enough to say something about" is how they start disagreeing about it.
+const NOTICE_QUIET_MS = 400
+const NOTICE_INTERVAL_MS = 200
+
+export function createWalkNotice({ write, now, quietMs = NOTICE_QUIET_MS, intervalMs = NOTICE_INTERVAL_MS }) {
+  const startedAt = now()
+  let lastDrawnAt = 0
+  let widest = 0
+
+  return {
+    tick(text) {
+      if (now() - startedAt < quietMs) return
+      if (lastDrawnAt !== 0 && now() - lastDrawnAt < intervalMs) return
+
+      lastDrawnAt = now()
+      widest = Math.max(widest, text.length)
+      write(`\r${text.padEnd(widest)}`)
+    },
+    clear() {
+      if (widest === 0) return
+      write(`\r${' '.repeat(widest)}\r`)
     },
   }
 }

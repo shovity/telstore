@@ -8,12 +8,83 @@ export function stateDir(configDir = defaultConfigDir()) {
   return path.join(configDir, 'state')
 }
 
+// The other thing telstore keeps on this machine, and the only one that is not a record: a
+// stream upload borrows one chunk of disk at a time here while it sends it. Under
+// ~/.telstore rather than os.tmpdir() because /tmp is tmpfs on many Linux distributions, and
+// "borrow one chunk of disk" would silently mean "borrow 1800MB of RAM" — a memory limit
+// dressed up as a chunk size.
+//
+// It lives beside stateDir because it answers the same question — what has this machine got
+// of telstore's on it — and because `status` has to be able to ask without importing the
+// upload command, which would drag a second upload loop and teleproto in with it.
+export function tempDirFor(configDir = defaultConfigDir()) {
+  return path.join(configDir, 'tmp')
+}
+
+// What is in there now. A run removes its own chunk file on every ending it gets to run code
+// for, so a file here is either a run happening at this moment or a run that was stopped
+// where it stood — a SIGKILL, a crash, a machine losing power. Nothing here removes them:
+// from outside the run that owns one, those two cases look exactly the same, and deleting
+// the chunk a live upload is filling is the confident wrong thing this project refuses
+// everywhere else. Naming them is the whole job.
+//
+// A stat that fails yields an unknown size rather than a dropped row, the same care
+// listStates takes with mtimes: the file really can vanish between the readdir and the stat —
+// that is what a run finishing normally does — and status is the command someone runs
+// *because* something is wrong.
+export async function listTempChunks(configDir = defaultConfigDir()) {
+  const dir = tempDirFor(configDir)
+  let names
+
+  try {
+    names = await fs.readdir(dir)
+  } catch (err) {
+    // A machine that has never made a backup from a command has no such directory, and that
+    // is not a fault to report. Anything else is: a directory telstore cannot read may be
+    // holding a whole chunk, and answering "nothing there" would be the silent wrong answer
+    // this listing exists to prevent. The caller decides what to do with it.
+    if (err.code === 'ENOENT') return []
+
+    throw err
+  }
+
+  const found = []
+
+  for (const name of names.sort()) {
+    const file = path.join(dir, name)
+    let size = null
+
+    try {
+      const stat = await fs.stat(file)
+
+      if (!stat.isFile()) continue
+
+      size = stat.size
+    } catch {
+      // Gone or unreadable between the readdir and here. Still a name worth printing: the
+      // point of the listing is that nothing telstore left behind goes unmentioned.
+    }
+
+    found.push({ name, file, size })
+  }
+
+  return found
+}
+
 export function stateKey(absPath, size, mtimeMs) {
   return createHash('sha1').update(`${absPath}:${size}:${mtimeMs}`).digest('hex')
 }
 
 export function stateFile(key, configDir = defaultConfigDir()) {
   return path.join(stateDir(configDir), `${key}.json`)
+}
+
+// stateKey hashes path:size:mtime, and a stream has none of the three. What holds still is
+// the backup id, and hashing it keeps the file name in the same 40-hex shape the directory
+// already sorts, prunes and filters on — a stream record is an upload record, not a third
+// kind, so it shares that namespace rather than getting a prefix of its own.
+export function streamKey(backupId) {
+  return createHash('sha1').update(`stream:${backupId}`).digest('hex')
 }
 
 // A restore's record is filed beside the uploads and must never compete with them for a
@@ -218,6 +289,13 @@ export async function findStates(backupId, configDir = defaultConfigDir()) {
 // Never throws. status calls this for every record it prints, and one damaged path must not
 // take the rest of the report down with it.
 export async function canResume(key, state) {
+  // A stream cannot be resumed by anyone, so this is not a question about a file. Answering
+  // it by stat-ing state.path would report "missing" for a record that never had a path,
+  // and status would then offer a resume command that starts a brand new backup. This has
+  // to run before the stat below, not after it fails: a stream record's key could still
+  // happen to match a real file on disk, and that file is not what makes it unresumable.
+  if (state.kind === 'stream') return { ok: false, reason: 'stream' }
+
   let stat
 
   try {

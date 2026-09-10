@@ -11,7 +11,7 @@ import {
 } from '../client.js'
 import { configFile, defaultConfigDir, loadConfig } from '../config.js'
 import { chunkFileName, manifestFileName, parseManifest } from '../manifest.js'
-import { formatBytes, formatDuration } from '../progress.js'
+import { formatBytes, formatDuration, plural } from '../progress.js'
 import { assertLoggedIn } from '../session.js'
 import { requireChat, resolveSettings } from '../settings.js'
 
@@ -19,10 +19,6 @@ import { requireChat, resolveSettings } from '../settings.js'
 // decoration, and nothing verifies differently because of it. It is still text off a chat.
 function describeName(name) {
   return typeof name === 'string' && name.trim() !== '' ? name : '—'
-}
-
-function plural(n, word) {
-  return `${n} ${word}${n === 1 ? '' : 's'}`
 }
 
 // What is wrong with one chunk, or null when nothing is. The first failing check wins: a
