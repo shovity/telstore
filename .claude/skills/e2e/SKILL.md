@@ -91,7 +91,16 @@ Miss one of these and the run has not replaced what it was meant to replace.
    multi-chunk backup must return the manifest and no chunk. If that ever fails, `--search` by
    id is broken on exactly the backups where it matters most.
 
-7. **Clean up only what this run created.** Track ids as you go, remove them at the end even
+7. **A `tarc` → `tarx` round trip over a directory tree**, with `--chunk-size` set so one
+   backup's chunks cross the 10MB large-file threshold both ways, same as check 1. **Compare
+   the extracted tree, never the archive bytes.** gzip writes an mtime into its header, so
+   `tar czf -` run twice over an unchanged tree is not byte-reproducible, and an
+   archive-to-archive sha256 comparison fails for a reason that has nothing to do with
+   telstore — this is the trap waiting for whoever tests compression next, because the archive
+   is the first thing anyone reaches for. Assert the tree instead: every file's sha256, the
+   sorted list of paths, and the modes, before archiving and after extracting.
+
+8. **Clean up only what this run created.** Track ids as you go, remove them at the end even
    if an assertion threw, and print what you could not remove with the command to do it by
    hand. Remove the temporary `HOME` too.
 

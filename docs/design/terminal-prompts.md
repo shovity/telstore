@@ -84,3 +84,29 @@ would move the lie rather than remove it, to a Ctrl-C that arrives while the man
 still going out. Everything *after* the run ends is already covered: the `settled` flag is
 checked before any of the messages, because said about a run that has finished they are all
 false at once.
+
+**tar's own file listing is allowed into a child's argv only through a mode that is already
+noisy by request.** `--verbose` on `tarc`/`tarx` turns `czf`/`xzf` into `czvf`/`xzvf`, and `v`
+writes one line per file to stderr — the same stream `createProgress` owns with `\r`, and that
+teleproto's own connection log already shares whenever `--verbose` is set. Making that the
+default instead of gating it behind `--verbose` would mean a restore of a thousand-file tree
+tearing through the progress bar on every ordinary run; gating it behind a flag that already
+means "show more than usual" costs nothing extra, because whoever turns it on has already
+accepted a stderr two other things are writing to. The child's stderr stays inherited either
+way, never captured — `docs/design/module-boundaries.md` has why — so `--verbose` only ever
+decides whether `tar` is one more thing writing to that stream, never whether telstore reads
+what it says.
+
+**Ctrl-C on a streaming restore is the immediate exit every other command used to be, and it is
+deliberately the opposite of the stream upload direction above.** A stream upload has chunks
+sitting in the chat that nothing else will ever point at, so its Ctrl-C has to be waited for
+while the run unwinds and removes them — that is the whole reason `abortRun` and the deadline
+exist. A streaming restore has put nothing in the chat: everything it has done so far is
+downloads this process already owns and a prefix of bytes some command has already read.
+`bin/telstore.js` never wires `restore-stream`'s own cleanup into `abortRun`, so SIGINT falls
+straight through to the branch every ordinary, nothing-to-unwind command takes — the line is
+printed and the process leaves on the spot. The one thing that exit still has to do is
+`stopChild()`: a synchronous `kill()` on the child, called from inside `leave()` before
+anything else runs. Leaving without it would let `tar` go on writing files into somebody's
+directory for as long as it takes the kernel to notice its parent is gone — telstore would have
+said it stopped while the command it spawned had not.

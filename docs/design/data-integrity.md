@@ -92,6 +92,52 @@
   job — with the chat spelled out, because `runDelete` resolves its own destination from config
   and these ids fired at the wrong peer would destroy whatever happens to carry them there.
 
+- **The restore direction's guarantee is the write-side mirror of the biconditional above,
+  stated in bytes rather than in EOF and exit code.** `telstore restore <id> -- tar xzf -`
+  pipes a backup into a command's stdin instead of writing `<target>.partial`, so none of the
+  checks earlier in this file that depend on a file — the rename, the final stat, the resumed
+  scan — have anything to run against. What `src/commands/restore-stream.js` puts in their
+  place is one rule: no byte reaches the command before the chunk it belongs to has matched its
+  sha256 against the manifest, and a run reports a restore only if every chunk verified,
+  `manifest.size` bytes were handed to the pipe, stdin was closed, and the command exited 0. A
+  command that stops reading early — `head -c 10`, or a crash mid-chunk — is a failure even at
+  exit 0: exit 0 answers "did the command finish", not "did it receive the backup", and a
+  confident wrong answer there is exactly what this project exists to refuse.
+- **The whole-backup arithmetic is done once, by `parseManifest`, and `runRestoreStream` never
+  does it again.** There is no file to stat at the end the way `runRestore` stats `.partial`,
+  so the only thing standing between a self-consistent-looking manifest and a truncated command
+  is `parseManifest`'s own check that the chunk sizes sum to `manifest.size` and that every
+  chunk sits where a restore would look for it. A manifest that disagrees with itself never
+  reaches the streaming restore's loop at all; summing the chunks a second time inside that
+  loop would be a second copy of one piece of arithmetic, and the copy nobody is looking at is
+  the one that ends up wrong.
+- **The temp chunk belongs to the run, not to the backup.** Each chunk downloads to
+  `~/.telstore/tmp/<id>-<i>.chunk`, is verified, and is removed — on success, on a failed
+  sha256, on a pipe that has gone, on Ctrl-C, on every ending this run gets to run code for —
+  because `src/commands/status.js` deliberately never removes one: from outside the run that
+  owns it, a file being filled right now and a file a run left behind when it died are the same
+  file, and a chunk this run leaks is a file nothing on the machine will ever delete. This is
+  the opposite of what `runRestore` does with `.partial`: there, keeping a chunk that failed its
+  sha256 lets the next run resume from it; a streaming restore has no next run to resume — it
+  starts from the first chunk every time — so keeping the file on a failed check would only be
+  a leak with an excuse.
+- **A known sharp edge, with the measurement that bounds it.** A pipe that fails —
+  an `'error'` on `child.stdin`, or a write into a destination that has already gone — makes
+  `runRestoreStream` refuse a restore even when the command goes on to exit 0, because the
+  bytes that write was carrying are not known to have arrived
+  (`docs/design/module-boundaries.md` has why `writeChunkTo` has to ask this itself rather than
+  trust `pipeline` to tell it). That refusal is safe for the canonical consumer and costs
+  something real for an unusual one. Measured 2026-09-10: `tar xzf -` fed every byte of a real
+  2,001,116-byte `.tar.gz`, one write at a time, each one waited for before the next was sent,
+  **had not exited even 300ms after the last byte was handed to it** — GNU tar 1.35 waits for
+  EOF past the archive's own end-of-archive marker before it is willing to exit — and
+  `child.stdin.end()` on a tar still reading raised no error, exit 0, three runs of three. So
+  the canonical consumer never meets the refusal this paragraph describes: it is still reading,
+  by design, at the moment telstore closes its end cleanly behind it. The cost falls only on a
+  command that reads a known length and stops — `head -c 10`, or anything counting its own
+  bytes — and the failure direction there is a refused restore, loud and re-runnable, rather
+  than a backup reported restored that the command never finished taking.
+
 - **A known limit, named because it was seen and not closed: telstore never checks that
   Telegram actually deleted anything.** `deleteMessages` in `src/client.js` throws away what
   `client.deleteMessages` hands back and counts `deleted += batch.length` for every batch the

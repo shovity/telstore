@@ -100,3 +100,17 @@ when it happens. A fake `searchManifest` returns whatever the test hands it, so 
 path is easy to test and the condition that makes it necessary cannot be reproduced at all. The
 same is true of the claim the whole feature rests on: only a real chat can show that a rolled
 back stream upload left nothing behind in it. Both belong to the `e2e` skill, not to `npm test`.
+
+**The restore direction has the same hole the upload direction had, because it is the same
+fake.** `test/restore-stream.test.js` drives `runRestoreStream` against a fake `client`, a fake
+`getMessage`, a fake `downloadChunk`, and a fake `spawn` — every one of them accepting whatever
+shape the test hands it, the same way the upload-side fakes do. A call that hands teleproto the
+wrong object is therefore invisible on this side too, for exactly the reason it was invisible on
+the upload side: the mismatch is with teleproto's real API surface, and nothing in `test/` talks
+to that surface. The concrete precedent is `src/commands/delete.js:354-355` — `walk.manifest`
+where `walk.manifest.message` was meant — which reached a real run on the previous branch with
+every test green, because the fake `walk` the delete tests construct has always been whatever
+shape the test wrote by hand. `restore-stream.js` reads `searchManifest`, `getMessage` and
+`downloadChunk` results the same way, so the next field typo in this direction gets the same
+free pass until it meets a real account. Nothing closes this from inside `npm test`; it is what
+the `e2e` skill's round trip is for.
