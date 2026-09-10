@@ -4,6 +4,14 @@ import { parseArgs } from 'node:util'
 import { deleteCommand } from './shell.js'
 import { archiveName } from './tar.js'
 
+// The shortcuts dispatch by name, not through SUBCOMMANDS: what they return is not a command
+// called `tarc`, it is an upload (or, once tarx joins, a restore) with the line already
+// rewritten into the form that command understands — there is no `runTarc` for SUBCOMMANDS to
+// route to. They still belong in the set below all the same, because SUBCOMMANDS is the list of
+// words telstore will not read as a file name, and a shortcut claims one exactly as a
+// subcommand does. Task 3 adds `['tarx', tarxLine]` here.
+const SHORTCUTS = new Map([['tarc', tarcLine]])
+
 const SUBCOMMANDS = new Set([
   'login',
   'logout',
@@ -16,7 +24,7 @@ const SUBCOMMANDS = new Set([
   'config',
   'token',
   'help',
-  'tarc',
+  ...SHORTCUTS.keys(),
 ])
 
 export const OPTIONS = {
@@ -433,7 +441,8 @@ export function route(argv) {
     return { command: 'help', args: [], options: values, filesAfterNote, childArgv, shortcut: null }
   }
 
-  if (first === 'tarc') return tarcLine(rest, values, filesAfterNote)
+  const shortcut = SHORTCUTS.get(first)
+  if (shortcut) return shortcut(rest, values, filesAfterNote)
 
   if (SUBCOMMANDS.has(first)) {
     return { command: first, args: rest, options: values, filesAfterNote, childArgv, shortcut: null }

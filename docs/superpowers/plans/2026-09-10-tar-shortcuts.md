@@ -340,9 +340,9 @@ test that asserted `route`'s whole return shape.
 
 - [ ] **Step 8: Prove the tests are not vacuous**
 
-Remove `'tarc'` from `SUBCOMMANDS` and re-run: the expansion test must fail (the word falls
-through to the upload path). Replace `czvf` with `czf` in the verbose branch: the verbose test
-must fail. Restore both.
+Remove `['tarc', tarcLine]` from `SHORTCUTS` and re-run: the expansion test must fail (the word
+falls through to the upload path). Replace `czvf` with `czf` in the verbose branch: the verbose
+test must fail. Restore both.
 
 - [ ] **Step 9: Commit**
 
