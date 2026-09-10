@@ -170,6 +170,7 @@ export async function writeChunkTo(writable, handle, length, { onProgress = () =
     failure ??= new DestinationGoneError(err ?? null)
     if (wake) wake()
   }
+
   const onError = (err) => fail(err)
   const onClose = () => fail(null)
   const onDrain = () => {
@@ -180,23 +181,45 @@ export async function writeChunkTo(writable, handle, length, { onProgress = () =
   writable.on('close', onClose)
   writable.on('drain', onDrain)
 
-  // Not a 'data' listener on the source: attaching one switches the stream to flowing mode and
-  // the backpressure this function exists to honour goes with it. `for await` pulls instead, so
-  // nothing is read while a write is unacknowledged — and it is also what disposes of the read
-  // stream, on the way out of the loop and on a throw from inside it alike. Destroying it here
-  // by hand would be worse than redundant: measured on node 22, destroying a read stream opened
-  // this way closes the FileHandle under it whatever `autoClose` says, and the next chunk would
-  // then ask a closed handle for a stream.
-  const source = handle.createReadStream({ start: 0, end: length - 1, autoClose: false })
+  // The failure to raise now: the one the listeners caught, or a destination that had already
+  // gone before this function was ever called. That second one cannot be listened for, because
+  // there is nothing left to hear — measured on node 22, `write()` into a destroyed or an
+  // already-ended stream returns false and emits nothing at all, node's `errorOrDestroy` bailing
+  // out on a stream that is already destroyed — so 'error', 'close' and 'drain' are all events
+  // that can no longer arrive and the wait below would be forever. The `pipeline` this replaced
+  // rejected on it; a command that takes one chunk and closes its end at the chunk boundary is
+  // how a restore gets here, and the `failure === null` guard on the wait does not help, because
+  // that covers a destination that died during a write rather than before one.
+  const failureNow = () => {
+    if (failure === null && (writable.destroyed || writable.writableEnded)) fail(null)
 
+    return failure
+  }
   try {
+    // Inside the try, because it throws: `createReadStream` on a handle that is already closed
+    // fails synchronously (measured: ERR_OUT_OF_RANGE on fd -1), and opened above this line that
+    // would leave the three listeners on somebody's stdin — the exact leak this loop exists to
+    // have fixed. Not a 'data' listener on the stream either: attaching one switches it to
+    // flowing mode and the backpressure this function exists to honour goes with it. `for await`
+    // pulls instead, so nothing is read while a write is unacknowledged.
+    //
+    // Nothing destroys it by hand, which is measured rather than tidy. On node 22 a `destroy()`
+    // on a read stream opened this way closes the FileHandle under it whatever `autoClose` says
+    // — EBADF on the next read — and the next chunk would then ask a closed handle for a stream.
+    // What the two exits really do, on the same node: leaving the loop by a throw destroys the
+    // stream through the iterator's `return()`, while reaching the end of it does not destroy
+    // the stream at all — it is finished, holds no fd of its own, and the caller's handle is
+    // untouched either way.
+    const source = handle.createReadStream({ start: 0, end: length - 1, autoClose: false })
+
     for await (const bytes of source) {
-      // At the top, because this is where a failure that landed while the loop was waiting —
-      // for a read, or for the drain below — is raised. Before the write and before the count,
-      // so a destination that has already gone is handed nothing more: the bytes reported here
-      // are what the caller's running total and its failure message are built from, and one
-      // buffer more would be up to 64KB the message claims and the destination never took.
-      if (failure !== null) throw failure
+      // At the top, because this is where a failure is raised: one that landed while the loop was
+      // waiting — for a read, or for the drain below — and one that was already there before the
+      // first read. Before the write and before the count, so a destination that has gone is
+      // handed nothing more: the bytes reported here are what the caller's running total and its
+      // failure message are built from, and one buffer more would be up to 64KB the message
+      // claims and the destination never took.
+      if (failureNow() !== null) throw failure
 
       seen += bytes.length
       onProgress(bytes.length)
@@ -205,12 +228,12 @@ export async function writeChunkTo(writable, handle, length, { onProgress = () =
       // destination, which is as much as anything on this side can know. Whether the command
       // on the far end ever read it is what its exit code answers.
       //
-      // `failure === null` is what stops the wait outliving the thing it is waiting for: a
-      // drain that has already been overtaken by an error or a close is a drain that will never
-      // come, and waiting for it is the hang this project refuses everywhere. A failure that
-      // lands during the wait wakes it instead, and the check at the top of the next turn — or
-      // the one after the loop, on the last buffer — is where it is raised.
-      if (!writable.write(bytes) && failure === null) {
+      // `failureNow()` is what stops the wait outliving the thing it is waiting for: a drain
+      // that has been overtaken by an error, a close, or a destination that was already gone is
+      // a drain that will never come, and waiting for it is the hang this project refuses
+      // everywhere. A failure that lands during the wait wakes it instead, and the check at the
+      // top of the next turn — or the one after the loop, on the last buffer — raises it.
+      if (!writable.write(bytes) && failureNow() === null) {
         await new Promise((resolve) => {
           wake = resolve
         })
@@ -223,11 +246,11 @@ export async function writeChunkTo(writable, handle, length, { onProgress = () =
     writable.off('drain', onDrain)
   }
 
-  // A failure latched on the last write, after the loop had no more bytes to check it against.
-  // Accepted is not delivered: `write()` returning true means the destination took the bytes
-  // into its own buffer, and the EPIPE from a far end that has gone can arrive after that. Those
-  // bytes never reached the command, so this is not a chunk that went over.
-  if (failure !== null) throw failure
+  // A failure that landed on the last write, after the loop had no more bytes to check it
+  // against. Accepted is not delivered: `write()` returning true means the destination took the
+  // bytes into its own buffer, and the EPIPE from a far end that has gone can arrive after that.
+  // Those bytes never reached the command, so this is not a chunk that went over.
+  if (failureNow() !== null) throw failure
 
   // `createReadStream` stops at the file's real end of data without complaining when `end`
   // reaches past it, so a chunk file shorter than `length` makes the loop above finish having

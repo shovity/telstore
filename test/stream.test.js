@@ -529,3 +529,70 @@ test('a destination that has failed is handed no further buffers', async () => {
   assert.equal(accepted.length, 1, `expected one write, the destination was given ${accepted.length}`)
   assert.equal(reportedToDying, accepted[0])
 })
+
+// `write()` into a destroyed stream returns false and emits nothing at all — node's
+// `errorOrDestroy` bails out when the stream is already destroyed — so a pump that waits for
+// 'drain', 'error' or 'close' is waiting for an event that can no longer arrive. The destination
+// dying *during* a chunk is the case every fixture above covers; this is the other one, and it is
+// reachable through a restore: a command that reads one chunk and closes its end at the boundary.
+// The `pipeline` this function replaced rejected on all three shapes.
+test('a destination that had already gone before the call is a failure, not a wait', async () => {
+  const shapes = [
+    ['destroyed', (sink) => sink.destroy()],
+    [
+      'destroyed with an error',
+      (sink) => sink.destroy(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })),
+    ],
+    ['ended', (sink) => sink.end()],
+  ]
+
+  for (const [name, leave] of shapes) {
+    const { handle, dir } = await chunkFile(Buffer.alloc(1000, 1))
+    const sink = new PassThrough()
+
+    sink.resume()
+    // The latch every caller of this function has to hold anyway: an 'error' on a stream nobody
+    // is listening to is an uncaught exception, so without this the destroy below would take the
+    // test process down before writeChunkTo was ever called. runRestoreStream holds one of these
+    // for the life of a run, and for this reason.
+    sink.on('error', () => {})
+    leave(sink)
+    await new Promise((resolve) => setImmediate(resolve))
+
+    // A deadline, because what this test is about is a wait that never ends: without one a
+    // regression hangs the suite instead of failing this assertion.
+    const outcome = await Promise.race([
+      writeChunkTo(sink, handle, 1000).then(
+        () => 'resolved',
+        (err) => err.constructor.name,
+      ),
+      new Promise((resolve) => setTimeout(resolve, 1000, 'HUNG')),
+    ])
+
+    assert.equal(outcome, 'DestinationGoneError', `a sink left ${name} gave: ${outcome}`)
+
+    await handle.close()
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+// The listeners go on before the read stream is opened, and opening one throws on a handle that
+// has already been closed — so without the open inside the same `try`, a chunk that never got off
+// the ground would leave three handlers on somebody's stdin. Not reachable from the restore today
+// (a fresh handle is opened per chunk), and exactly the leak class the pump above was rewritten
+// for, which is why it is pinned rather than reasoned about.
+test('a chunk that cannot be opened leaves no listeners behind either', async () => {
+  const { handle, dir } = await chunkFile(Buffer.alloc(1000, 1))
+  const sink = new PassThrough()
+
+  sink.resume()
+  await handle.close()
+
+  await assert.rejects(() => writeChunkTo(sink, handle, 1000))
+
+  for (const event of ['error', 'close', 'drain']) {
+    assert.equal(sink.listenerCount(event), 0, `${event} listener left behind`)
+  }
+
+  await fs.rm(dir, { recursive: true, force: true })
+})
