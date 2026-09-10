@@ -500,3 +500,60 @@ test('--help wins over every terminator check, in any of its spellings', () => {
 test('the help subcommand wins over a terminator too', () => {
   assert.equal(route(['help', '--', 'tar', 'cf']).command, 'help')
 })
+
+// The test that matters most: the shortcut IS the long form. Anything else it could be —
+// a lookalike that drifts the day someone edits one of them — is the bug this asserts away.
+test('tarc expands into exactly the -- line a person could have typed', () => {
+  const short = route(['tarc', 'a.tar.gz', './x', './y'])
+  const long = route(['a.tar.gz', '--', 'tar', 'czf', '-', './x', './y'])
+
+  assert.equal(short.command, long.command)
+  assert.deepEqual(short.args, long.args)
+  assert.deepEqual(short.childArgv, long.childArgv)
+  assert.equal(short.shortcut, 'tarc')
+  assert.equal(long.shortcut, null)
+})
+
+test('the stored name is run through the gzip naming rule', () => {
+  assert.deepEqual(route(['tarc', 'a.tar', './x']).args, ['a.tar.gz'])
+  assert.deepEqual(route(['tarc', 'march', './x']).args, ['march.tar.gz'])
+})
+
+// tar writes its listing to stderr, where the progress bar lives, so it is only invited into
+// a mode that is already noisy by request.
+test('--verbose adds v to tar and still sets the flag telstore reads', () => {
+  const parsed = route(['tarc', '--verbose', 'a.tar.gz', './x'])
+
+  assert.deepEqual(parsed.childArgv, ['tar', 'czvf', '-', './x'])
+  assert.equal(parsed.options.verbose, true)
+})
+
+test('flags that belong to telstore still reach telstore', () => {
+  const parsed = route(['tarc', '--chat', '@store', '--note', 'march', 'a.tar.gz', './x'])
+
+  assert.equal(parsed.options.chat, '@store')
+  assert.equal(parsed.options.note, 'march')
+  assert.deepEqual(parsed.childArgv, ['tar', 'czf', '-', './x'])
+})
+
+test('tarc with a name and nothing to archive is refused', () => {
+  assert.throws(() => route(['tarc', 'a.tar.gz']), /Nothing to archive/)
+})
+
+test('tarc with no name at all is refused', () => {
+  assert.throws(() => route(['tarc']), /Missing a name/)
+})
+
+// Two commands on one line is a line with no answer, so it gets a refusal rather than a
+// guess about which one was meant.
+test('tarc cannot be followed by -- : it already is the command', () => {
+  assert.throws(() => route(['tarc', 'a.tar.gz', './x', '--', 'tar', 'cf', '-', './x']),
+    /already is the command/)
+})
+
+test('a file literally named tarc still uploads as ./tarc', () => {
+  const parsed = route(['./tarc'])
+
+  assert.equal(parsed.command, 'upload')
+  assert.deepEqual(parsed.args, ['./tarc'])
+})

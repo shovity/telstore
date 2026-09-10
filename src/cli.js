@@ -2,6 +2,7 @@ import { basename } from 'node:path'
 import { parseArgs } from 'node:util'
 
 import { deleteCommand } from './shell.js'
+import { archiveName } from './tar.js'
 
 const SUBCOMMANDS = new Set([
   'login',
@@ -15,6 +16,7 @@ const SUBCOMMANDS = new Set([
   'config',
   'token',
   'help',
+  'tarc',
 ])
 
 export const OPTIONS = {
@@ -303,6 +305,45 @@ function filesNamedAfterNote(tokens) {
   return tokens.some((token) => token.kind === 'positional' && token.index > note.index)
 }
 
+// tarc is the long form with the three decisions that never change already made: `c` for
+// create, `z` for gzip, `f -` for "write it to stdout, which is where telstore is listening".
+// The missing `-` is not a hypothetical mistake — it was in this project's own help text and
+// README, where `tar cf ./a` exits 2 with "Cowardly refusing to create an empty archive".
+//
+// An expansion rather than a command of its own: `runStreamUpload` is reached with exactly the
+// argv the `--` form reaches it with, so there is no second upload path, no second rollback
+// and no second guarantee. It also prints that argv, so the shortcut teaches the long form
+// instead of hiding it.
+function tarcLine(rest, values, filesAfterNote) {
+  const [name, ...paths] = rest
+
+  if (name === undefined) {
+    throw new Error(
+      'Missing a name for the backup. tarc stores the archive under a name you choose. ' +
+        'Example: npx telstore tarc a.tar.gz ./a',
+    )
+  }
+
+  // Refused rather than answered with a guess: a rule that read one positional as a name and
+  // two as a name plus a path would make `telstore tarc ./x ./y` archive ./y under the name
+  // ./x, which is the silent wrong answer this project exists to refuse.
+  if (paths.length === 0) {
+    throw new Error(
+      `Nothing to archive: tarc needs the paths to put in ${name}. ` +
+        'Example: npx telstore tarc a.tar.gz ./a',
+    )
+  }
+
+  return {
+    command: 'upload',
+    args: [archiveName(name)],
+    options: values,
+    filesAfterNote,
+    childArgv: ['tar', values.verbose ? 'czvf' : 'czf', '-', ...paths],
+    shortcut: 'tarc',
+  }
+}
+
 export function route(argv) {
   const { head, childArgv } = splitAtTerminator(argv)
 
@@ -320,7 +361,7 @@ export function route(argv) {
   // `telstore --help -- tar cf ./a` is asking what telstore does, not making a mistake for
   // one of the checks below to catch.
   if (values.help || first === 'help') {
-    return { command: 'help', args: [], options: values, filesAfterNote, childArgv }
+    return { command: 'help', args: [], options: values, filesAfterNote, childArgv, shortcut: null }
   }
 
   if (childArgv !== null && childArgv.length === 0) {
@@ -334,6 +375,16 @@ export function route(argv) {
   // ordinary help/chat fallbacks get a chance to answer for it — those apply to a line that
   // never named a command to run at all.
   if (childArgv !== null) {
+    // Reached before the generic "takes no command after --" below, because for these two the
+    // reason is different and so is the way out: they are not a subcommand that happens not to
+    // run commands, they are a command already.
+    if (first === 'tarc' || first === 'tarx') {
+      throw new Error(
+        `${first} already is the command it runs, so it cannot be followed by another one. ` +
+          `Drop the -- to use ${first}, or drop ${first} to write the command out yourself.`,
+      )
+    }
+
     if (first !== undefined && SUBCOMMANDS.has(first)) {
       // restore is let through rather than refused here, and the binary is what turns it away.
       // The shape is the spec's stage 2, so the parser keeps it whole — but a refusal that
@@ -346,7 +397,7 @@ export function route(argv) {
         )
       }
 
-      return { command: first, args: rest, options: values, filesAfterNote, childArgv }
+      return { command: first, args: rest, options: values, filesAfterNote, childArgv, shortcut: null }
     }
 
     if (positionals.length === 0) {
@@ -363,7 +414,7 @@ export function route(argv) {
       )
     }
 
-    return { command: 'upload', args: positionals, options: values, filesAfterNote, childArgv }
+    return { command: 'upload', args: positionals, options: values, filesAfterNote, childArgv, shortcut: null }
   }
 
   // `telstore --chat @chan` with no file used to mean "remember this destination". Flags no
@@ -379,14 +430,16 @@ export function route(argv) {
   }
 
   if (first === undefined) {
-    return { command: 'help', args: [], options: values, filesAfterNote, childArgv }
+    return { command: 'help', args: [], options: values, filesAfterNote, childArgv, shortcut: null }
   }
 
+  if (first === 'tarc') return tarcLine(rest, values, filesAfterNote)
+
   if (SUBCOMMANDS.has(first)) {
-    return { command: first, args: rest, options: values, filesAfterNote, childArgv }
+    return { command: first, args: rest, options: values, filesAfterNote, childArgv, shortcut: null }
   }
 
   // Every positional, not just the first: `telstore a b c` used to upload `a` and drop the
   // rest without a word, which is the one thing this project never does.
-  return { command: 'upload', args: positionals, options: values, filesAfterNote, childArgv }
+  return { command: 'upload', args: positionals, options: values, filesAfterNote, childArgv, shortcut: null }
 }
