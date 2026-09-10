@@ -42,6 +42,28 @@ let leaving = false
 // own on every ending it gets to run code for; this exists for the one ending it does not.
 let tempChunk = null
 
+// The command a streaming restore is feeding, if one is running. A stream upload unwinds
+// cooperatively and kills its own child on the way; a restore has nothing in the chat to
+// unwind, so Ctrl-C leaves at once — and leaving without this would let tar go on writing
+// files into somebody's directory after telstore had said it stopped. Synchronous, like
+// dropTempChunk and for the same reason: anything awaited here would be waiting on the run
+// this exit exists to stop waiting for.
+let killChild = null
+
+function stopChild() {
+  const kill = killChild
+
+  if (kill === null) return
+
+  killChild = null
+
+  try {
+    kill()
+  } catch {
+    // Already gone. There is nothing this could do about it and nothing worth saying.
+  }
+}
+
 // What a Ctrl-C that will not wait can still do about that file, and it has to be exactly this
 // shape: local and unawaited, because anything awaited here would be waiting on the very run
 // this exit exists to stop waiting for. `unlinkSync` holds no handle, opens no socket and
@@ -91,6 +113,8 @@ const finished = []
 // to process.exit, because on a pipe stderr is asynchronous, and the line most at risk of
 // being cut in half is the one below carrying the command that removes the leftovers.
 function leave(message) {
+  stopChild()
+
   // Called twice means Ctrl-C landed again while the first line was still flushing, or the
   // deadline arrived on top of it. There is nothing more to say, and someone pressing it a
   // second time is asking to be gone rather than read to.
@@ -248,7 +272,7 @@ async function main() {
     }
 
     case 'upload': {
-      // `telstore a.tar -- tar cf ./a`: one name, and the bytes are what the command writes
+      // `telstore a.tar -- tar cf - ./a`: one name, and the bytes are what the command writes
       // rather than a file on disk. route has already refused every other shape of that line.
       if (parsed.childArgv) {
         const { runStreamUpload } = await import('../src/commands/upload-stream.js')
@@ -309,18 +333,34 @@ async function main() {
     }
 
     case 'restore': {
-      // `route` keeps this shape whole because it is the spec's stage 2, and nothing here
-      // reads it yet. Restoring to a file instead would be the quiet wrong answer this project
-      // refuses everywhere else: the bytes were asked for on a command's stdin, and a file
-      // appearing in the working directory is not that — it is a different thing done
-      // confidently. So it is refused, and the refusal says what works today instead.
+      // The spec's stage 2, and the refusal that stood here is gone: the bytes were asked for
+      // on a command's stdin and that is now where they go.
       if (parsed.childArgv) {
-        throw new Error(
-          'Restoring into a command is not built yet, and telstore is not going to write a ' +
-            'file instead and call that done. Run "npx telstore restore ' +
-            `${parsed.args[0] ?? '<backup-id>'}" to get the file, then pipe it into ` +
-            `"${parsed.childArgv.join(' ')}" yourself.`,
-        )
+        const { runRestoreStream } = await import('../src/commands/restore-stream.js')
+
+        // So Ctrl-C says the restore sentence rather than the upload one.
+        streaming = true
+
+        await runRestoreStream(parsed.args[0], parsed.childArgv, parsed.options, {
+          // Only the alias promises gzip. The general form promises nothing and is asked
+          // nothing, which is how `restore <id> -- tar xf -` stays useful.
+          requireGzipName: parsed.shortcut === 'tarx',
+          onBackupId: (id) => {
+            currentBackupId = id
+          },
+          onTempChunk: (file) => {
+            tempChunk = file
+          },
+          onChild: (kill) => {
+            killChild = kill
+          },
+        })
+
+        // Mirrors the stream-upload branch above: the run has finished, so a Ctrl-C landing in
+        // the output-flush window that follows must not print the "removing what it already
+        // sent" sentence about a restore that already has everything it is going to get.
+        settled = true
+        return
       }
 
       if (!parsed.args[0]) {

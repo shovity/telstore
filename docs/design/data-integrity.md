@@ -42,7 +42,7 @@
   and the stat, and `status` is the command someone runs *because* something is wrong.
 
 - **A stream upload has no re-stat to make, and the child's exit code is what stands in its
-  place.** `telstore a.tar -- tar cf ./a` reads a command's stdout, so there is no file to
+  place.** `telstore a.tar -- tar cf - ./a` reads a command's stdout, so there is no file to
   stat, no length known up front and no `planChunks`. The rule that replaces it is a
   biconditional, and it is the entire reason telstore spawns the command instead of accepting
   `tar c ./dir | telstore`: **the manifest is sent if and only if stdout reached EOF and the
@@ -91,6 +91,80 @@
   resumable, and the run prints the `npx telstore delete <id> --chat <chat>` that finishes the
   job — with the chat spelled out, because `runDelete` resolves its own destination from config
   and these ids fired at the wrong peer would destroy whatever happens to carry them there.
+
+- **The restore direction's guarantee is the write-side mirror of the biconditional above,
+  stated in bytes rather than in EOF and exit code.** `telstore restore <id> -- tar xzf -`
+  pipes a backup into a command's stdin instead of writing `<target>.partial`, so none of the
+  checks earlier in this file that depend on a file — the rename, the final stat, the resumed
+  scan — have anything to run against. What `src/commands/restore-stream.js` puts in their
+  place is one rule: no byte reaches the command before the chunk it belongs to has matched its
+  sha256 against the manifest, and a run reports a restore only if every chunk verified,
+  `manifest.size` bytes were handed to the pipe, stdin was closed, and the command exited 0. A
+  command that stops reading early — `head -c 10`, or a crash mid-chunk — is a failure even at
+  exit 0: exit 0 answers "did the command finish", not "did it receive the backup", and a
+  confident wrong answer there is exactly what this project exists to refuse.
+- **The whole-backup arithmetic is done once, by `parseManifest`, and `runRestoreStream` never
+  does it again.** There is no file to stat at the end the way `runRestore` stats `.partial`,
+  so the only thing standing between a self-consistent-looking manifest and a truncated command
+  is `parseManifest`'s own check that the chunk sizes sum to `manifest.size` and that every
+  chunk sits where a restore would look for it. A manifest that disagrees with itself never
+  reaches the streaming restore's loop at all; summing the chunks a second time inside that
+  loop would be a second copy of one piece of arithmetic, and the copy nobody is looking at is
+  the one that ends up wrong.
+- **The temp chunk belongs to the run, not to the backup.** Each chunk downloads to
+  `~/.telstore/tmp/<id>-<i>.chunk`, is verified, and is removed — on success, on a failed
+  sha256, on a pipe that has gone, on Ctrl-C, on every ending this run gets to run code for —
+  because `src/commands/status.js` deliberately never removes one: from outside the run that
+  owns it, a file being filled right now and a file a run left behind when it died are the same
+  file, and a chunk this run leaks is a file nothing on the machine will ever delete. This is
+  the opposite of what `runRestore` does with `.partial`: there, keeping a chunk that failed its
+  sha256 lets the next run resume from it; a streaming restore has no next run to resume — it
+  starts from the first chunk every time — so keeping the file on a failed check would only be
+  a leak with an excuse.
+- **A known sharp edge, with the measurement that bounds it.** A pipe that fails —
+  an `'error'` on `child.stdin`, or a write into a destination that has already gone — makes
+  `runRestoreStream` refuse a restore even when the command goes on to exit 0, because the
+  bytes that write was carrying are not known to have arrived
+  (`docs/design/module-boundaries.md` has why `writeChunkTo` has to ask this itself rather than
+  trust `pipeline` to tell it). That refusal is safe for the canonical consumer and costs
+  something real for an unusual one. Measured 2026-09-10: `tar xzf -` fed every byte of a real
+  2,001,116-byte `.tar.gz`, one write at a time, each one waited for before the next was sent,
+  **had not exited even 300ms after the last byte was handed to it** — GNU tar 1.35 waits for
+  EOF past the archive's own end-of-archive marker before it is willing to exit — and
+  `child.stdin.end()` on a tar still reading raised no error, exit 0, three runs of three. So
+  the canonical consumer never meets the refusal this paragraph describes: it is still reading,
+  by design, at the moment telstore closes its end cleanly behind it. The cost falls only on a
+  command that reads a known length and stops — `head -c 10`, or anything counting its own
+  bytes — and the failure direction there is a refused restore, loud and re-runnable, rather
+  than a backup reported restored that the command never finished taking.
+
+- **The guarantee above binds only when the unread remainder is larger than the OS pipe
+  buffer, and that is a real boundary, not an implementation gap to close.** Once every byte of
+  a chunk has entered the kernel's pipe buffer, `write()` returns success — the kernel took the
+  bytes, and nothing on telstore's side of the pipe can find out afterwards whether a process
+  holding the read end ever looked at them before exiting 0. `runRestoreStream` only learns a
+  destination is gone from a write that the buffer would not accept, so a command that reads
+  part of a chunk and exits while what is left of that chunk still fits in the buffer is
+  indistinguishable, from telstore's side, from a command that read every byte. Measured
+  2026-09-10, `head -c 10 >/dev/null; sleep 2` inside `sh -c '…'` as the child (the `sleep` is
+  what keeps the shell alive long enough for the pipe to matter, rather than exiting the instant
+  `head` does and killing the write from the other end):
+
+  | payload | reported |
+  | --- | --- |
+  | 19.8 KB | **success** — the whole remainder after `head`'s ten bytes fit in the pipe buffer, `write()` took it without complaint, and telstore reported a restore of a file `sh` never finished reading |
+  | 391 KB | fails correctly — the remainder no longer fits, the buffer stays full because nothing is draining it, `write()` blocks and then the destination reports itself gone |
+
+  Nothing in `src/stream.js` or `src/commands/restore-stream.js` can close this: the failure
+  this project exists to refuse is a *silent* wrong answer, and there is no signal left to read
+  once the bytes are in the kernel's buffer and the reader has gone — refusing every restore
+  behind a command that might stop early would refuse the canonical consumer too, which the
+  entry above measures reading past its own archive's end for exactly the opposite reason. What
+  the boundary means in practice: a `--out` pipeline is proven end-to-end only against a command
+  that reads everything it is given, the same condition the design has always rested the
+  guarantee on, and a command that deliberately reads a known prefix and stops — `head`, `dd
+  count=`, anything sizing its own read — sits on the unproven side of it whenever that prefix
+  plus whatever the OS pipe buffer holds is smaller than what is left of the backup.
 
 - **A known limit, named because it was seen and not closed: telstore never checks that
   Telegram actually deleted anything.** `deleteMessages` in `src/client.js` throws away what

@@ -1,10 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { promises as fs } from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
-import { Readable } from 'node:stream'
+import { PassThrough, Readable, Writable } from 'node:stream'
 
-import { ChunkReader } from '../src/stream.js'
+import { ChunkReader, writeChunkTo } from '../src/stream.js'
 
 import { tempDir } from './helpers.js'
 
@@ -247,4 +248,351 @@ test('close does not overwrite the error the source already threw', async () => 
   const second = await fs.open(file, 'w')
   await assert.rejects(() => reader.fill(second, 100), /producer exploded/)
   await second.close()
+})
+
+async function chunkFile(bytes) {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'telstore-stream-'))
+  const file = path.join(dir, 'chunk')
+
+  await fs.writeFile(file, bytes)
+
+  return { handle: await fs.open(file, 'r'), dir }
+}
+
+test('it writes exactly the length it was given, and no more', async () => {
+  const { handle, dir } = await chunkFile(Buffer.from('abcdefghij'))
+  const sink = new PassThrough()
+  const seen = []
+
+  sink.on('data', (bytes) => seen.push(bytes))
+
+  // 4, not 10: the file may be longer than the chunk it holds when a download was cut short,
+  // and the manifest's length is the one that decides.
+  await writeChunkTo(sink, handle, 4)
+  await handle.close()
+  await fs.rm(dir, { recursive: true, force: true })
+
+  assert.equal(Buffer.concat(seen).toString(), 'abcd')
+})
+
+// `createReadStream({ start: 0, end: length - 1 })` stops at the file's real end of data and
+// does not complain when `end` reaches past it — measured, not assumed. A download cut short
+// must not be reported as a chunk this function actually moved: the caller downstream adds
+// `length` to its running total, not what this function actually wrote, so a short file here
+// silently becomes a truncated stream handed to somebody's tar and a restore reported as done.
+test('a chunk file shorter than the length it is asked for is refused, not silently truncated', async () => {
+  const { handle, dir } = await chunkFile(Buffer.from('abcd'))
+  const sink = new PassThrough()
+
+  sink.resume()
+
+  await assert.rejects(() => writeChunkTo(sink, handle, 10), (err) => {
+    assert.match(err.message, /4/)
+    assert.match(err.message, /10/)
+    return true
+  })
+
+  await handle.close()
+  await fs.rm(dir, { recursive: true, force: true })
+})
+
+// Two chunks down one pipe is the whole point: the command sees one stream, not one per chunk.
+test('the destination stays open between chunks and the handle survives', async () => {
+  const { handle, dir } = await chunkFile(Buffer.from('abcde'))
+  const sink = new PassThrough()
+  const seen = []
+
+  sink.on('data', (bytes) => seen.push(bytes))
+
+  await writeChunkTo(sink, handle, 5)
+  await writeChunkTo(sink, handle, 5)
+
+  assert.equal(sink.writableEnded, false)
+
+  // Still ours: the read stream must not have closed the fd underneath us.
+  const probe = Buffer.alloc(1)
+  assert.equal((await handle.read(probe, 0, 1, 0)).bytesRead, 1)
+
+  await handle.close()
+  await fs.rm(dir, { recursive: true, force: true })
+  assert.equal(Buffer.concat(seen).toString(), 'abcdeabcde')
+})
+
+test('progress is reported as the bytes go, not in one lump at the end', async () => {
+  const { handle, dir } = await chunkFile(Buffer.alloc(200_000, 1))
+  const sink = new PassThrough({ highWaterMark: 1024 })
+
+  sink.resume()
+
+  let reported = 0
+  let calls = 0
+
+  await writeChunkTo(sink, handle, 200_000, {
+    onProgress: (bytes) => {
+      reported += bytes
+      calls += 1
+    },
+  })
+
+  await handle.close()
+  await fs.rm(dir, { recursive: true, force: true })
+
+  assert.equal(reported, 200_000)
+  assert.ok(calls > 1, `expected several progress calls, got ${calls}`)
+})
+
+// The test above only proves onProgress fires in pieces — a sink in flowing mode (`.resume()`)
+// would report that same shape from an implementation that attached a raw 'data' listener and
+// ignored write()'s return value, which is exactly the backpressure this function exists to
+// honour rather than a readFile and one write: a chunk can be up to 1800MB and must never sit
+// whole in this process's memory. This is the test that can tell the two apart: a destination
+// that never acknowledges a write must stall the read, not finish reading regardless.
+test('a destination that never acknowledges a write stalls the read rather than buffering the whole chunk', async () => {
+  const size = 1_000_000
+  const { handle, dir } = await chunkFile(Buffer.alloc(size, 1))
+
+  // Holds every write() callback until release() is called, so nothing downstream of the first
+  // unacknowledged write can be told "go ahead" — which is what a destination that stopped
+  // reading (a real command whose stdin pipe is full) looks like from here.
+  let gateOpen = false
+  const pendingDones = []
+  const sink = new Writable({
+    write(_bytes, _encoding, done) {
+      if (gateOpen) done()
+      else pendingDones.push(done)
+    },
+  })
+
+  let reported = 0
+  const finished = writeChunkTo(sink, handle, size, {
+    onProgress: (bytes) => {
+      reported += bytes
+    },
+  })
+
+  // A real pause, not a tick: a 1MB file reads from disk in well under this on any machine
+  // this suite runs on, so an implementation that actually honours backpressure stalls and
+  // stays stalled for the whole wait, while one that ignores it finishes reading regardless.
+  await new Promise((resolve) => setTimeout(resolve, 200))
+
+  const stalledAt = reported
+
+  assert.ok(stalledAt > 0, 'expected the first write to have gone through before the stall')
+  assert.ok(
+    stalledAt < size,
+    'a destination that never acknowledges a write must stall the read well short of the ' +
+      `whole ${size}-byte file; saw ${stalledAt} bytes reported with nothing downstream ` +
+      'ever accepting a write',
+  )
+
+  gateOpen = true
+  while (pendingDones.length > 0) pendingDones.shift()()
+
+  await finished
+  await handle.close()
+  await fs.rm(dir, { recursive: true, force: true })
+
+  assert.equal(reported, size)
+})
+
+// A command that stops reading is the failure this function exists to surface. Silence here
+// would become a restore reported as finished for a command that never saw it.
+test('a destination that fails surfaces the failure', async () => {
+  const { handle, dir } = await chunkFile(Buffer.alloc(64_000, 1))
+  const sink = new Writable({
+    write(_bytes, _encoding, done) {
+      done(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }))
+    },
+  })
+
+  await assert.rejects(() => writeChunkTo(sink, handle, 64_000), /EPIPE/)
+
+  await handle.close()
+  await fs.rm(dir, { recursive: true, force: true })
+})
+
+test('a zero-length chunk writes nothing and does not throw', async () => {
+  const { handle, dir } = await chunkFile(Buffer.alloc(0))
+  const sink = new PassThrough()
+
+  await writeChunkTo(sink, handle, 0)
+  await handle.close()
+  await fs.rm(dir, { recursive: true, force: true })
+
+  assert.equal(sink.readableLength, 0)
+})
+
+// `pipeline` never cleans up after a destination it was told not to end, so every chunk left
+// four handlers behind on the command's stdin: eight after four chunks, four distinct
+// MaxListenersExceededWarnings torn through the progress bar by the eleventh, and at
+// MAX_CHUNKS around 40,000 closures on one emitter, each retaining a finished pipeline's
+// graph for the whole run. Nothing above this could see it — every other fixture here, and
+// every one in test/restore-stream.test.js, is one or two chunks.
+test('a destination fed many chunks is left with no listeners of this function', async () => {
+  const { handle, dir } = await chunkFile(Buffer.alloc(1000, 1))
+  const sink = new PassThrough()
+
+  sink.resume()
+
+  const counts = () => ({
+    error: sink.listenerCount('error'),
+    close: sink.listenerCount('close'),
+    drain: sink.listenerCount('drain'),
+    finish: sink.listenerCount('finish'),
+    end: sink.listenerCount('end'),
+  })
+
+  await writeChunkTo(sink, handle, 1000)
+  const afterOne = counts()
+
+  await writeChunkTo(sink, handle, 1000)
+  await writeChunkTo(sink, handle, 1000)
+
+  assert.deepEqual(counts(), afterOne, 'a third chunk must not cost more listeners than the first')
+  assert.deepEqual(afterOne, { error: 0, close: 0, drain: 0, finish: 0, end: 0 })
+
+  await handle.close()
+  await fs.rm(dir, { recursive: true, force: true })
+})
+
+// `write()` returning true means the destination took the bytes into its own buffer, not that
+// they reached whatever is on the far end, so the EPIPE belonging to the last write of a chunk
+// can arrive after the loop has run out of bytes to check it against. Reporting that chunk as
+// one that went over is how a caller's running total comes to include bytes nobody received.
+test('a destination that fails after the last byte was handed over is still a failure', async () => {
+  const { handle, dir } = await chunkFile(Buffer.alloc(1000, 1))
+  const sink = new Writable({
+    write(_bytes, _encoding, done) {
+      done()
+      process.nextTick(() => sink.destroy(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })))
+    },
+  })
+
+  await assert.rejects(() => writeChunkTo(sink, handle, 1000), /EPIPE/)
+
+  await handle.close()
+  await fs.rm(dir, { recursive: true, force: true })
+})
+
+// A destination that has already failed must not be handed the next buffer, and what the
+// failure costs the caller is the reason: the bytes this function reports through onProgress are
+// what the caller's running total and its failure message are built from, so one buffer written
+// into a pipe that had already gone would be 64KB the message claims and nothing received.
+//
+// Twice over, because a failure can reach this loop in two different waits and one check does
+// not cover both: while it is waiting for a destination that would not take the last buffer, and
+// while it is waiting for the next read from a destination that took it and died afterwards.
+async function pumpInto(sink, onProgress) {
+  const { handle, dir } = await chunkFile(Buffer.alloc(200_000, 1))
+
+  await assert.rejects(() => writeChunkTo(sink, handle, 200_000, { onProgress }), /EPIPE/)
+
+  await handle.close()
+  await fs.rm(dir, { recursive: true, force: true })
+}
+
+test('a destination that has failed is handed no further buffers', async () => {
+  const refused = []
+  // Small highWaterMark: the first write is not acknowledged, so the loop is inside its drain
+  // wait when the failure arrives.
+  const refusing = new Writable({
+    highWaterMark: 1024,
+    write(bytes, _encoding, done) {
+      refused.push(bytes.length)
+      done(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }))
+    },
+  })
+
+  let reportedToRefusing = 0
+  await pumpInto(refusing, (bytes) => (reportedToRefusing += bytes))
+
+  assert.equal(refused.length, 1, `expected one write, the destination was given ${refused.length}`)
+  assert.equal(reportedToRefusing, refused[0])
+
+  const accepted = []
+  // A highWaterMark wide enough that the write is acknowledged at once, so the loop is waiting
+  // on the next read — not on a drain — when the far end goes.
+  const dyingAfter = new Writable({
+    highWaterMark: 1_000_000,
+    write(bytes, _encoding, done) {
+      accepted.push(bytes.length)
+      done()
+      process.nextTick(() =>
+        dyingAfter.destroy(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })),
+      )
+    },
+  })
+
+  let reportedToDying = 0
+  await pumpInto(dyingAfter, (bytes) => (reportedToDying += bytes))
+
+  assert.equal(accepted.length, 1, `expected one write, the destination was given ${accepted.length}`)
+  assert.equal(reportedToDying, accepted[0])
+})
+
+// `write()` into a destroyed stream returns false and emits nothing at all — node's
+// `errorOrDestroy` bails out when the stream is already destroyed — so a pump that waits for
+// 'drain', 'error' or 'close' is waiting for an event that can no longer arrive. The destination
+// dying *during* a chunk is the case every fixture above covers; this is the other one, and it is
+// reachable through a restore: a command that reads one chunk and closes its end at the boundary.
+// The `pipeline` this function replaced rejected on all three shapes.
+test('a destination that had already gone before the call is a failure, not a wait', async () => {
+  const shapes = [
+    ['destroyed', (sink) => sink.destroy()],
+    [
+      'destroyed with an error',
+      (sink) => sink.destroy(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })),
+    ],
+    ['ended', (sink) => sink.end()],
+  ]
+
+  for (const [name, leave] of shapes) {
+    const { handle, dir } = await chunkFile(Buffer.alloc(1000, 1))
+    const sink = new PassThrough()
+
+    sink.resume()
+    // The latch every caller of this function has to hold anyway: an 'error' on a stream nobody
+    // is listening to is an uncaught exception, so without this the destroy below would take the
+    // test process down before writeChunkTo was ever called. runRestoreStream holds one of these
+    // for the life of a run, and for this reason.
+    sink.on('error', () => {})
+    leave(sink)
+    await new Promise((resolve) => setImmediate(resolve))
+
+    // A deadline, because what this test is about is a wait that never ends: without one a
+    // regression hangs the suite instead of failing this assertion.
+    const outcome = await Promise.race([
+      writeChunkTo(sink, handle, 1000).then(
+        () => 'resolved',
+        (err) => err.constructor.name,
+      ),
+      new Promise((resolve) => setTimeout(resolve, 1000, 'HUNG')),
+    ])
+
+    assert.equal(outcome, 'DestinationGoneError', `a sink left ${name} gave: ${outcome}`)
+
+    await handle.close()
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+// The listeners go on before the read stream is opened, and opening one throws on a handle that
+// has already been closed — so without the open inside the same `try`, a chunk that never got off
+// the ground would leave three handlers on somebody's stdin. Not reachable from the restore today
+// (a fresh handle is opened per chunk), and exactly the leak class the pump above was rewritten
+// for, which is why it is pinned rather than reasoned about.
+test('a chunk that cannot be opened leaves no listeners behind either', async () => {
+  const { handle, dir } = await chunkFile(Buffer.alloc(1000, 1))
+  const sink = new PassThrough()
+
+  sink.resume()
+  await handle.close()
+
+  await assert.rejects(() => writeChunkTo(sink, handle, 1000))
+
+  for (const event of ['error', 'close', 'drain']) {
+    assert.equal(sink.listenerCount(event), 0, `${event} listener left behind`)
+  }
+
+  await fs.rm(dir, { recursive: true, force: true })
 })

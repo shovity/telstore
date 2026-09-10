@@ -91,7 +91,24 @@ Miss one of these and the run has not replaced what it was meant to replace.
    multi-chunk backup must return the manifest and no chunk. If that ever fails, `--search` by
    id is broken on exactly the backups where it matters most.
 
-7. **Clean up only what this run created.** Track ids as you go, remove them at the end even
+7. **A `tarc` → `tarx` round trip over a directory tree**, with `--chunk-size` set so one
+   backup's chunks cross the 10MB large-file threshold both ways, same as check 1. **Compare
+   the extracted tree, never the archive bytes.** The archive is not what anybody restores: a
+   byte comparison passes on an archive that extracts to the wrong tree, and fails on a `tar`
+   or `gzip` version difference that has nothing to do with telstore. Assert the tree instead:
+   every file's sha256, the sorted list of paths, and the modes, before archiving and after
+   extracting.
+
+   This rule used to carry a reason that was measured and found false on 2026-09-10: "gzip
+   writes an mtime into its header, so `tar czf -` over an unchanged tree is not
+   byte-reproducible". It is reproducible — gzip writes MTIME **zero** when its input is a
+   pipe, because there is no file to stat, so three runs of `tar czf - ./tree` gave one sha256.
+   `gzip -c <file>` is the form that stamps a time. `docs/design/settings-and-flags.md` carries
+   the measurement and why the instruction stands anyway. Kept here rather than quietly
+   rewritten, because a reason that sounds convincing is exactly what makes a wrong one survive:
+   the rule is load-bearing, the old justification was not.
+
+8. **Clean up only what this run created.** Track ids as you go, remove them at the end even
    if an assertion threw, and print what you could not remove with the command to do it by
    hand. Remove the temporary `HOME` too.
 

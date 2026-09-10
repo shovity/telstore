@@ -1,3 +1,7 @@
+import { promises as fs } from 'node:fs'
+
+import { formatBytes } from './progress.js'
+
 // `handle.write(buffer)` is not guaranteed to write the whole buffer in one call. `bytes`
 // becomes the chunk's recorded length, so trusting an unchecked write would let telstore
 // claim more reached disk than actually did — silently wrong data, the one thing this
@@ -114,5 +118,178 @@ export class ChunkReader {
     } catch {
       // As above.
     }
+  }
+}
+
+// What a destination that has gone away is reported as, and a class rather than a message so
+// the caller can tell it from this function's own refusal below without matching on words. The
+// restore direction has to say different things about a command that stopped reading and a
+// chunk file that came up short, and a check on the spelling of an error is a check that goes
+// quietly wrong the first time a node release rewords one.
+export class DestinationGoneError extends Error {
+  constructor(cause) {
+    super(
+      cause === null
+        ? 'The destination closed before the chunk was through.'
+        : `The destination stopped accepting bytes: ${cause.message}`,
+      { cause: cause ?? undefined },
+    )
+    this.name = 'DestinationGoneError'
+  }
+}
+
+// The other direction from ChunkReader, and hand-rolled for a reason of the same kind.
+// `pipeline` was the obvious choice here and the wrong one: `{ end: false }` is what lets a
+// command see one stream rather than one per chunk, and a destination that is never ended is a
+// destination `pipeline` never cleans up after — its error, close, finish and end handlers stay
+// on it for the life of the run. Measured on node 22: one handler per chunk on a PassThrough,
+// four on a child's stdin, MaxListenersExceededWarnings torn through the progress bar by the
+// eleventh chunk, and at MAX_CHUNKS around 40,000 closures on one emitter each retaining a
+// finished pipeline's graph. So the loop is explicit, and every listener it adds it takes off
+// again on the way out.
+//
+// What the loop has to keep, because the destination is a command's stdin and not a file:
+// backpressure (a chunk can be 1800MB and must never sit whole in this process), a failure
+// that rejects rather than waits forever, the handle left usable for the next chunk
+// (`autoClose: false`, measured on node 22 rather than assumed), and the destination left open.
+export async function writeChunkTo(writable, handle, length, { onProgress = () => {} } = {}) {
+  // `end: length - 1` is inclusive, so zero has to be turned away before it asks for byte -1.
+  if (length === 0) return
+
+  let seen = 0
+  let failure = null
+  let wake = null
+
+  // Latched for the whole pump rather than only while a drain is being waited for: a
+  // destination can fail in the middle of a write this loop is not waiting on, and a loop that
+  // noticed only at its next stall would go on reading into a pipe that has gone. `close`
+  // counts for as much as `error` — a command that leaves without a word closes its end and
+  // emits nothing else, and a drain that can never come is the hang this project refuses
+  // everywhere — so both of them wake the wait below as well as arming it.
+  const fail = (err) => {
+    failure ??= new DestinationGoneError(err ?? null)
+    if (wake) wake()
+  }
+
+  const onError = (err) => fail(err)
+  const onClose = () => fail(null)
+  const onDrain = () => {
+    if (wake) wake()
+  }
+
+  writable.on('error', onError)
+  writable.on('close', onClose)
+  writable.on('drain', onDrain)
+
+  // The failure to raise now: the one the listeners caught, or a destination that had already
+  // gone before this function was ever called. That second one cannot be listened for, because
+  // there is nothing left to hear — measured on node 22, `write()` into a destroyed or an
+  // already-ended stream returns false and emits nothing at all, node's `errorOrDestroy` bailing
+  // out on a stream that is already destroyed — so 'error', 'close' and 'drain' are all events
+  // that can no longer arrive and the wait below would be forever. The `pipeline` this replaced
+  // rejected on it; a command that takes one chunk and closes its end at the chunk boundary is
+  // how a restore gets here, and the `failure === null` guard on the wait does not help, because
+  // that covers a destination that died during a write rather than before one.
+  const failureNow = () => {
+    if (failure === null && (writable.destroyed || writable.writableEnded)) fail(null)
+
+    return failure
+  }
+  try {
+    // Inside the try, because it throws: `createReadStream` on a handle that is already closed
+    // fails synchronously (measured: ERR_OUT_OF_RANGE on fd -1), and opened above this line that
+    // would leave the three listeners on somebody's stdin — the exact leak this loop exists to
+    // have fixed. Not a 'data' listener on the stream either: attaching one switches it to
+    // flowing mode and the backpressure this function exists to honour goes with it. `for await`
+    // pulls instead, so nothing is read while a write is unacknowledged.
+    //
+    // Nothing destroys it by hand, which is measured rather than tidy. On node 22 a `destroy()`
+    // on a read stream opened this way closes the FileHandle under it whatever `autoClose` says
+    // — EBADF on the next read — and the next chunk would then ask a closed handle for a stream.
+    // What the two exits really do, on the same node: leaving the loop by a throw destroys the
+    // stream through the iterator's `return()`, while reaching the end of it does not destroy
+    // the stream at all — it is finished, holds no fd of its own, and the caller's handle is
+    // untouched either way.
+    const source = handle.createReadStream({ start: 0, end: length - 1, autoClose: false })
+
+    for await (const bytes of source) {
+      // At the top, because this is where a failure is raised: one that landed while the loop was
+      // waiting — for a read, or for the drain below — and one that was already there before the
+      // first read. Before the write and before the count, so a destination that has gone is
+      // handed nothing more: the bytes reported here are what the caller's running total and its
+      // failure message are built from, and one buffer more would be up to 64KB the message
+      // claims and the destination never took.
+      if (failureNow() !== null) throw failure
+
+      seen += bytes.length
+      onProgress(bytes.length)
+
+      // Handed over, not accepted: what this counts is what telstore wrote into the
+      // destination, which is as much as anything on this side can know. Whether the command
+      // on the far end ever read it is what its exit code answers.
+      //
+      // `failureNow()` is what stops the wait outliving the thing it is waiting for: a drain
+      // that has been overtaken by an error, a close, or a destination that was already gone is
+      // a drain that will never come, and waiting for it is the hang this project refuses
+      // everywhere. A failure that lands during the wait wakes it instead, and the check at the
+      // top of the next turn — or the one after the loop, on the last buffer — raises it.
+      if (!writable.write(bytes) && failureNow() === null) {
+        await new Promise((resolve) => {
+          wake = resolve
+        })
+        wake = null
+      }
+    }
+  } finally {
+    writable.off('error', onError)
+    writable.off('close', onClose)
+    writable.off('drain', onDrain)
+  }
+
+  // A failure that landed on the last write, after the loop had no more bytes to check it
+  // against. Accepted is not delivered: `write()` returning true means the destination took the
+  // bytes into its own buffer, and the EPIPE from a far end that has gone can arrive after that.
+  // Those bytes never reached the command, so this is not a chunk that went over.
+  if (failureNow() !== null) throw failure
+
+  // `createReadStream` stops at the file's real end of data without complaining when `end`
+  // reaches past it, so a chunk file shorter than `length` makes the loop above finish having
+  // moved too few bytes. That must not be read as success: the caller's running total is built
+  // from the size it was told to expect, so a short chunk here would become a truncated stream
+  // handed to somebody's tar and reported as a finished restore — the one thing this project
+  // refuses to do. This is the only failure this function raises on its own account; everything
+  // else that comes out of it belongs to the destination or to the file being read.
+  if (seen !== length) {
+    throw new Error(
+      `The chunk file held ${seen} bytes, but ${length} were asked for — the chunk is ` +
+        'shorter than the manifest says it should be. Refusing to hand the destination a ' +
+        'truncated stream and call it done.',
+    )
+  }
+}
+
+// The borrowing ends whether the chunk went out or the run fell over on it. close() failing
+// must not be what stops the unlink — the file would sit there holding a whole chunk that
+// nothing will ever remove — and a removal that fails must not replace the error already on
+// its way out of the loop, so it is said on stderr rather than thrown.
+//
+// On writeErr rather than warn, like the prune report and for the same reason: a leaked file
+// holding up to 1.8GB is not narration about a transfer that --silent asked to be spared. It
+// is telstore leaving something on this machine that only the user can now clear up, and a
+// caller silencing the progress bar has not asked to be kept in the dark about that.
+export async function discardChunkFile(handle, file, { writeErr, chunkSize }) {
+  try {
+    await handle.close()
+  } catch {
+    // The file is about to be unlinked; whatever close had to say about it changes nothing.
+  }
+
+  try {
+    await fs.rm(file, { force: true })
+  } catch (err) {
+    writeErr(
+      `\nCould not remove the temporary chunk file ${file}: ${err.message}. It holds up to ` +
+        `${formatBytes(chunkSize)} and telstore will not try again — remove it by hand.\n`,
+    )
   }
 }

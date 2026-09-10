@@ -31,37 +31,11 @@ import {
   streamKey,
   tempDirFor,
 } from '../state.js'
-import { ChunkReader } from '../stream.js'
+import { ChunkReader, discardChunkFile } from '../stream.js'
 import { uploadRange } from '../uploader.js'
 import { createOnRetry, realSendChunk, realSendManifest } from './upload.js'
 
-// The borrowing ends whether the chunk went out or the run fell over on it. close() failing
-// must not be what stops the unlink — the file would sit there holding a whole chunk that
-// nothing will ever remove — and a removal that fails must not replace the error already on
-// its way out of the loop, so it is said on stderr rather than thrown.
-//
-// On writeErr rather than warn, like the prune report and for the same reason: a leaked file
-// holding up to 1.8GB is not narration about a transfer that --silent asked to be spared. It
-// is telstore leaving something on this machine that only the user can now clear up, and a
-// caller silencing the progress bar has not asked to be kept in the dark about that.
-async function discard(handle, file, { writeErr, chunkSize }) {
-  try {
-    await handle.close()
-  } catch {
-    // The file is about to be unlinked; whatever close had to say about it changes nothing.
-  }
-
-  try {
-    await fs.rm(file, { force: true })
-  } catch (err) {
-    writeErr(
-      `\nCould not remove the temporary chunk file ${file}: ${err.message}. It holds up to ` +
-        `${formatBytes(chunkSize)} and telstore will not try again — remove it by hand.\n`,
-    )
-  }
-}
-
-// `telstore a.tar -- tar cf ./a`: the backup's bytes are what the command writes, and the
+// `telstore a.tar -- tar cf - ./a`: the backup's bytes are what the command writes, and the
 // name is a label, not a file telstore reads.
 //
 // This is runUpload with the one thing it leans on taken away — a length known up front — so
@@ -90,8 +64,8 @@ export async function runStreamUpload(name, childArgv, options = {}, deps = {}) 
     // How Ctrl-C reaches a run that must not be killed where it stands. See the call below.
     onAbortable = () => {},
     // Which chunk file this run is holding, so the one ending that does not come back through
-    // `discard` can still take it with it. Said before the file is opened and unsaid after it
-    // is removed, so the caller's copy is never narrower than what is actually on disk.
+    // `discardChunkFile` can still take it with it. Said before the file is opened and unsaid
+    // after it is removed, so the caller's copy is never narrower than what is actually on disk.
     onTempChunk = () => {},
   } = deps
 
@@ -357,11 +331,11 @@ export async function runStreamUpload(name, childArgv, options = {}, deps = {}) 
               count += 1
             }
           } finally {
-            await discard(handle, file, { writeErr, chunkSize })
+            await discardChunkFile(handle, file, { writeErr, chunkSize })
 
             // Unsaid whether the removal worked or not. If it did there is nothing left to
-            // remove; if it did not, `discard` has already named the file on stderr, and a
-            // second attempt from the signal handler would say it twice.
+            // remove; if it did not, `discardChunkFile` has already named the file on stderr,
+            // and a second attempt from the signal handler would say it twice.
             onTempChunk(null)
           }
 

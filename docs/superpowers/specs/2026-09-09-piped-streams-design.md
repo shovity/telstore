@@ -71,7 +71,7 @@ from a command telstore spawns instead of from stdin.
 ## CLI surface
 
 ```bash
-npx telstore a.tar -- tar cf ./a
+npx telstore a.tar -- tar cf - ./a
 npx telstore db.sql -- pg_dump mydb
 npx telstore dir.tar.age -- sh -c 'tar c ./dir | age -r age1abc...'
 
@@ -90,7 +90,7 @@ Rules, all enforced in `route`:
   argv it was handed, before that rescue runs — otherwise a negative chat id turns into a
   command to execute. This is the one place in the parser where two features write the same
   token for opposite reasons, and a test must hold them apart.
-- A name is required **before** `--`. `telstore -- tar cf ./a` is refused by name rather than
+- A name is required **before** `--`. `telstore -- tar cf - ./a` is refused by name rather than
   taking `tar` as the file name and running `cf ./a`, which fails as "cf: not found" and
   sends nobody anywhere useful.
 - Exactly one name before `--`. `telstore a.tar b.tar -- tar c ./x` is refused: one child

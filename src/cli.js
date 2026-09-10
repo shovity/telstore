@@ -2,6 +2,18 @@ import { basename } from 'node:path'
 import { parseArgs } from 'node:util'
 
 import { deleteCommand } from './shell.js'
+import { archiveName } from './tar.js'
+
+// The shortcuts dispatch by name, not through SUBCOMMANDS: what they return is not a command
+// called `tarc`, it is an upload (or, for `tarx`, a restore) with the line already
+// rewritten into the form that command understands — there is no `runTarc` for SUBCOMMANDS to
+// route to. They still belong in the set below all the same, because SUBCOMMANDS is the list of
+// words telstore will not read as a file name, and a shortcut claims one exactly as a
+// subcommand does.
+const SHORTCUTS = new Map([
+  ['tarc', tarcLine],
+  ['tarx', tarxLine],
+])
 
 const SUBCOMMANDS = new Set([
   'login',
@@ -15,6 +27,7 @@ const SUBCOMMANDS = new Set([
   'config',
   'token',
   'help',
+  ...SHORTCUTS.keys(),
 ])
 
 export const OPTIONS = {
@@ -39,6 +52,9 @@ Usage:
   npx telstore login                      Log in to Telegram, only needed once
   npx telstore <file|folder|pattern>...   Split files and upload them to Telegram
   npx telstore <name> -- <command>...     Store what a command writes, under <name>
+  npx telstore tarc <name> <path>...      Archive paths with tar and store the archive
+  npx telstore tarx <backup-id>           Restore a backup and extract it with tar
+  npx telstore restore <id> -- <cmd>...   Restore onto a command instead of a file
   npx telstore list                       List the backups stored in the destination
   npx telstore list --search <text>       List only the backups that text appears in
   npx telstore restore <backup-id>...     Download the chunks and reassemble the files
@@ -60,7 +76,7 @@ one file is listed and confirmed before the first byte goes out. Run telstore ag
 the files that are left to carry on after an interruption.
 
 A name followed by -- makes the backup out of what a command writes, so nothing has to be on
-disk first: npx telstore a.tar -- tar cf ./a. The manifest goes out only if that command's
+disk first: npx telstore a.tar -- tar cf - ./a. The manifest goes out only if that command's
 output ended and the command exited 0 — an end after a crash looks exactly like an end after
 success, and running the command is how telstore tells them apart. A backup made this way
 cannot be resumed, so a run that fails, and a Ctrl-C, remove the chunks already sent rather
@@ -69,6 +85,16 @@ goes in as -- bash -c 'set -o pipefail; ...', which is also where compression or
 belongs. The pipefail is not decoration — a shell reports the last command's exit status, so
 without it a producer that dies halfway through a pipeline still exits 0 and the manifest goes
 out for a truncated backup.
+
+tarc and tarx are the common case written out once: "npx telstore tarc a.tar.gz ./dir"
+is "npx telstore a.tar.gz -- tar czf - ./dir", and tarx is the same for "restore <id> --
+tar xzf -". telstore prints the long form as it runs, so the shortcut teaches what it is
+short for. tarc always compresses, so it makes the name say so: a.tar becomes a.tar.gz,
+and a name with no tar in it at all gets .tar.gz. --verbose adds tar's own file listing
+to both. For tarx, --out is the directory it extracts into, and tar's own semantics apply
+there: it overwrites files already in it without asking, unlike restore's one-file [y/N]
+prompt — --out is how you aim it somewhere empty instead. Anything beyond archiving
+the paths — -C, --exclude, a pipeline, another compressor — is what -- is still for.
 
 down is logout taken all the way: it removes ~/.telstore entirely — the session, the api_id
 and api_hash, every setting and every resume record — and asks once before it does. It opens
@@ -161,6 +187,17 @@ export function interruptMessage(
       `\nStopping. Backup ${backupId} was made from a command and cannot be resumed, so ` +
       'telstore is removing the chunks it already sent. This takes a moment — press Ctrl-C ' +
       'again to leave now and clean up by hand.\n'
+    )
+  }
+
+  // The restore direction of the same idea, and the difference is the whole message: a stream
+  // upload has to unwind what it put in the chat, while this one put nothing there. What it
+  // cannot put back is what the command already did with the bytes it was given.
+  if (command === 'restore' && stream) {
+    return (
+      '\nStopped. Nothing in the chat changed and nothing was kept on this machine, but the ' +
+      'command had already been given part of the backup, so whatever it wrote from that is ' +
+      'incomplete. A restore into a command cannot be resumed — run it again from the start.\n'
     )
   }
 
@@ -303,6 +340,75 @@ function filesNamedAfterNote(tokens) {
   return tokens.some((token) => token.kind === 'positional' && token.index > note.index)
 }
 
+// tarc is the long form with the three decisions that never change already made: `c` for
+// create, `z` for gzip, `f -` for "write it to stdout, which is where telstore is listening".
+// The missing `-` is not a hypothetical mistake — this project's own help text and README
+// shipped exactly that omission once, and paid for it with an example that exited 2 instead
+// of writing a backup.
+//
+// An expansion rather than a command of its own: `runStreamUpload` is reached with exactly the
+// argv the `--` form reaches it with, so there is no second upload path, no second rollback
+// and no second guarantee. It also prints that argv, so the shortcut teaches the long form
+// instead of hiding it.
+function tarcLine(rest, values, filesAfterNote) {
+  const [name, ...paths] = rest
+
+  if (name === undefined) {
+    throw new Error(
+      'Missing a name for the backup. tarc stores the archive under a name you choose. ' +
+        'Example: npx telstore tarc a.tar.gz ./a',
+    )
+  }
+
+  // Refused rather than answered with a guess: a rule that read one positional as a name and
+  // two as a name plus a path would make `telstore tarc ./x ./y` archive ./y under the name
+  // ./x, which is the silent wrong answer this project exists to refuse.
+  if (paths.length === 0) {
+    throw new Error(
+      `Nothing to archive: tarc needs the paths to put in ${name}. ` +
+        'Example: npx telstore tarc a.tar.gz ./a',
+    )
+  }
+
+  return {
+    command: 'upload',
+    args: [archiveName(name)],
+    options: values,
+    filesAfterNote,
+    childArgv: ['tar', values.verbose ? 'czvf' : 'czf', '-', ...paths],
+    shortcut: 'tarc',
+  }
+}
+
+// The mirror of tarcLine. `x` for extract, `z` because tarc always compressed, `f -` because
+// the bytes arrive on stdin.
+function tarxLine(rest, values, filesAfterNote) {
+  requireOneBackupId(rest, 'tarx')
+
+  const childArgv = ['tar', values.verbose ? 'xzvf' : 'xzf', '-']
+
+  // Pushed after `-` on purpose, which is the order measured to work on GNU tar 1.35:
+  // `tar xzf - -C ./here`. See the probe table in the spec.
+  if (values.out !== undefined) childArgv.push('-C', values.out)
+
+  return { command: 'restore', args: rest, options: values, filesAfterNote, childArgv, shortcut: 'tarx' }
+}
+
+// One command reads one stream, so a line that names two backups is a line with no answer:
+// extracting two archives into one working directory in sequence is a question nobody asked.
+function requireOneBackupId(ids, what) {
+  if (ids.length === 0) {
+    throw new Error(`Missing backup id. Example: npx telstore ${what} telstore-20260905-7f3a91`)
+  }
+
+  if (ids.length > 1) {
+    throw new Error(
+      `One command reads one stream, so ${what} takes one backup id and got ${ids.length}: ` +
+        `${ids.join(', ')}. Run telstore once per backup.`,
+    )
+  }
+}
+
 export function route(argv) {
   const { head, childArgv } = splitAtTerminator(argv)
 
@@ -317,16 +423,16 @@ export function route(argv) {
   const filesAfterNote = filesNamedAfterNote(tokens)
 
   // --help (or -h, or the `help` subcommand) always wins, terminator or not: someone typing
-  // `telstore --help -- tar cf ./a` is asking what telstore does, not making a mistake for
+  // `telstore --help -- tar cf - ./a` is asking what telstore does, not making a mistake for
   // one of the checks below to catch.
   if (values.help || first === 'help') {
-    return { command: 'help', args: [], options: values, filesAfterNote, childArgv }
+    return { command: 'help', args: [], options: values, filesAfterNote, childArgv, shortcut: null }
   }
 
   if (childArgv !== null && childArgv.length === 0) {
     throw new Error(
       'Missing the command after --: telstore has nothing to run and store. ' +
-        'Example: npx telstore a.tar -- tar cf ./a',
+        'Example: npx telstore a.tar -- tar cf - ./a',
     )
   }
 
@@ -334,6 +440,16 @@ export function route(argv) {
   // ordinary help/chat fallbacks get a chance to answer for it — those apply to a line that
   // never named a command to run at all.
   if (childArgv !== null) {
+    // Reached before the generic "takes no command after --" below, because for these two the
+    // reason is different and so is the way out: they are not a subcommand that happens not to
+    // run commands, they are a command already.
+    if (SHORTCUTS.has(first)) {
+      throw new Error(
+        `${first} already is the command it runs, so it cannot be followed by another one. ` +
+          `Drop the -- to use ${first}, or drop ${first} to write the command out yourself.`,
+      )
+    }
+
     if (first !== undefined && SUBCOMMANDS.has(first)) {
       // restore is let through rather than refused here, and the binary is what turns it away.
       // The shape is the spec's stage 2, so the parser keeps it whole — but a refusal that
@@ -341,18 +457,31 @@ export function route(argv) {
       // beside the alternative it is offering, not in an argument parser.
       if (first !== 'restore') {
         throw new Error(
-          `${first} takes no command after --. An upload is what runs one ` +
-            '(npx telstore a.tar -- tar cf ./a); restoring into a command is not built yet.',
+          `${first} takes no command after --. An upload (npx telstore a.tar -- tar cf - ./a) ` +
+            'and a restore (npx telstore restore <id> -- tar xf -) are the two that run one.',
         )
       }
 
-      return { command: first, args: rest, options: values, filesAfterNote, childArgv }
+      requireOneBackupId(rest, 'restore')
+
+      // --out places a file, and this path writes none: the bytes go to the command on its
+      // stdin. Left to pass silently it would read as "restore into the command AND write
+      // the file over there", which is not what happens.
+      if (values.out !== undefined) {
+        throw new Error(
+          'A restore into a command writes no file, so --out has nothing to place: the bytes ' +
+            'go to the command on its stdin. Tell the command where to put them instead ' +
+            '(npx telstore restore <id> -- tar xf - -C ./here).',
+        )
+      }
+
+      return { command: first, args: rest, options: values, filesAfterNote, childArgv, shortcut: null }
     }
 
     if (positionals.length === 0) {
       throw new Error(
         'Missing a name before --. telstore stores what the command writes under a name you ' +
-          'choose, and there is nothing to take one from. Example: npx telstore a.tar -- tar cf ./a',
+          'choose, and there is nothing to take one from. Example: npx telstore a.tar -- tar cf - ./a',
       )
     }
 
@@ -363,7 +492,7 @@ export function route(argv) {
       )
     }
 
-    return { command: 'upload', args: positionals, options: values, filesAfterNote, childArgv }
+    return { command: 'upload', args: positionals, options: values, filesAfterNote, childArgv, shortcut: null }
   }
 
   // `telstore --chat @chan` with no file used to mean "remember this destination". Flags no
@@ -379,14 +508,17 @@ export function route(argv) {
   }
 
   if (first === undefined) {
-    return { command: 'help', args: [], options: values, filesAfterNote, childArgv }
+    return { command: 'help', args: [], options: values, filesAfterNote, childArgv, shortcut: null }
   }
 
+  const shortcut = SHORTCUTS.get(first)
+  if (shortcut) return shortcut(rest, values, filesAfterNote)
+
   if (SUBCOMMANDS.has(first)) {
-    return { command: first, args: rest, options: values, filesAfterNote, childArgv }
+    return { command: first, args: rest, options: values, filesAfterNote, childArgv, shortcut: null }
   }
 
   // Every positional, not just the first: `telstore a b c` used to upload `a` and drop the
   // rest without a word, which is the one thing this project never does.
-  return { command: 'upload', args: positionals, options: values, filesAfterNote, childArgv }
+  return { command: 'upload', args: positionals, options: values, filesAfterNote, childArgv, shortcut: null }
 }

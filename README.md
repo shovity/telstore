@@ -16,7 +16,9 @@ npx telstore config chat @my_backups           # where backups go, from now on
 npx telstore data.tar                          # split it and send it there
 npx telstore a.tar b.tar c.tar                 # or several: one backup each, one after another
 npx telstore ./backups                         # or a folder: every file one level inside it
-npx telstore a.tar -- tar cf ./a               # or from a command, with no file on disk first
+npx telstore a.tar -- tar cf - ./a             # or from a command, with no file on disk first
+npx telstore tarc a.tar.gz ./dir               # or the common case of that: archive and store
+npx telstore tarx telstore-20260905-7f3a91     # restore a backup and extract it with tar
 npx telstore list                              # what is already in the destination
 npx telstore restore telstore-20260905-7f3a91
 ```
@@ -28,8 +30,11 @@ npx telstore restore telstore-20260905-7f3a91
 | `telstore login` | Log in to Telegram. Add `--token` to log in with a session token instead. |
 | `telstore <file\|folder\|pattern>...` | Split each file and upload it. Prints the `backupId` you restore with. |
 | `telstore <name> -- <command>...` | Run the command and store what it writes, under `<name>`. The manifest goes out only if the command exits 0. |
+| `telstore tarc <name> <path>...` | Archive the paths with `tar` and store the result. Always compresses, so the name ends in `.tar.gz`. |
+| `telstore tarx <backup-id>` | Restore a backup and extract it with `tar`. |
 | `telstore list` | The backups stored in the destination, newest first. |
 | `telstore restore <backup-id>...` | Download every chunk and reassemble the file. Several ids run one after another. |
+| `telstore restore <backup-id> -- <command>...` | Restore onto the command's stdin instead of a file. |
 | `telstore verify <backup-id>...` | Check that every chunk of a backup is still in the chat. Downloads nothing. |
 | `telstore delete <backup-id>...` | Remove a backup's chunks and manifest from the chat, for good. Several ids are listed and confirmed once. |
 | `telstore status` | Account, destination, and unfinished uploads and restores. |
@@ -130,7 +135,7 @@ to its standard output is the backup. The name in front of `--` is a label for i
 telstore reads:
 
 ```bash
-npx telstore a.tar -- tar cf ./a
+npx telstore a.tar -- tar cf - ./a
 npx telstore dir.tar.age -- bash -c 'set -o pipefail; tar c ./dir | age -r age1abc...'
 ```
 

@@ -1,0 +1,407 @@
+import { promises as fs } from 'node:fs'
+import path from 'node:path'
+
+import { describeChat } from '../chat.js'
+import {
+  closeQuietly,
+  connect as realConnect,
+  findManifestMessage,
+  readMessageBytes as realReadMessageBytes,
+} from '../client.js'
+import { configFile, defaultConfigDir, loadConfig } from '../config.js'
+import { parseManifest } from '../manifest.js'
+import { createProgress, formatBytes, plural } from '../progress.js'
+import { assertLoggedIn } from '../session.js'
+import { requireChat, resolveSettings } from '../settings.js'
+import { shellArg } from '../shell.js'
+import { spawnProducer } from '../spawn.js'
+import { tempDirFor } from '../state.js'
+import { DestinationGoneError, discardChunkFile, writeChunkTo } from '../stream.js'
+import { isGzipName } from '../tar.js'
+import { createOnRetry, realDownloadChunk, realGetMessage } from './restore.js'
+
+// `telstore restore <id> -- tar xzf -`: the backup's bytes go to a command's stdin instead of
+// into a file.
+//
+// This is runRestore with the file taken away, and the file was carrying more than the bytes:
+// no .partial, no resume record, no scan of what an earlier run left, no rename, and no stat
+// at the end to compare against the manifest. What replaces all of it is the order of two
+// things — verify the chunk, then hand it over — and the command's exit code.
+export async function runRestoreStream(backupId, childArgv, options = {}, deps = {}) {
+  const {
+    connect = realConnect,
+    disconnect = (client) => client.destroy(),
+    configDir = defaultConfigDir(),
+    searchManifest = findManifestMessage,
+    readMessageBytes = realReadMessageBytes,
+    getMessage = realGetMessage,
+    downloadChunk = realDownloadChunk,
+    spawn = spawnProducer,
+    retryOptions = {},
+    writeErr = (line) => process.stderr.write(line),
+    log: writeLog = (line) => console.log(line),
+    silent = false,
+    onBackupId = () => {},
+    onTempChunk = () => {},
+    // How a Ctrl-C that will not wait still stops the command. Unlike the upload direction
+    // there is nothing in the chat to unwind, so this run does not ask to be waited for — but
+    // leaving without stopping tar lets it go on writing files after telstore is gone.
+    onChild = () => {},
+    // tarx only. The alias promises gzip, so it checks the claim before spending a gigabyte
+    // finding out; `restore <id> -- tar xf -` promises nothing and is asked nothing.
+    requireGzipName = false,
+  } = deps
+
+  const config = await loadConfig(configDir)
+
+  assertLoggedIn(config)
+
+  const { values: settings } = resolveSettings(options, config, { file: configFile(configDir) })
+  const chat = requireChat(settings)
+  const log = silent ? () => {} : writeLog
+  const warn = silent ? () => {} : writeErr
+  const onRetry = createOnRetry(warn)
+
+  onBackupId(backupId)
+
+  const client = await connect(config, { verbose: settings.verbose })
+  let child = null
+  let ended = false
+  let written = 0
+
+  // Bytes written into the command, counted as they go rather than added up from the sizes the
+  // manifest claims: what the end of this function compares against manifest.size is then a
+  // measurement of what went into the pipe rather than a restatement of what was expected to.
+  // It is also the only way a run that stopped in the middle of a chunk can say how much it had
+  // written, which is in the message it fails with — and it is written, never read: whether the
+  // command on the far end took those bytes off the pipe is what its exit code answers.
+  const handed = (bytes) => {
+    written += bytes
+  }
+
+  try {
+    const manifestMessage = await searchManifest(client, chat, backupId)
+
+    if (!manifestMessage) {
+      throw new Error(
+        `No manifest found for ${backupId} in ${chat}. ` +
+          'Check the backup id, or use --chat to point at the right chat.',
+      )
+    }
+
+    // The whole-backup arithmetic is in here and stays there: parseManifest adds the chunk
+    // sizes up and compares them with manifest.size, refuses a layout where any chunk is not
+    // where restore would look for it, and counts the list against the size. A manifest that
+    // disagrees with itself therefore never reaches the line below, which is why this command
+    // does not add the sum again — two copies of one piece of arithmetic is how they start
+    // disagreeing, and the copy that is never reached is the one that would be wrong.
+    const manifest = parseManifest(await readMessageBytes(client, manifestMessage))
+
+    // Before the download, which is the only reason this check is worth making at all: tar
+    // would say "not in gzip format" by itself, but only after every byte had arrived.
+    if (requireGzipName && !isGzipName(manifest.name)) {
+      throw new Error(
+        `${backupId} is called ${manifest.name}, which does not claim to be gzipped, and tarx ` +
+          'always extracts with "tar xzf -". Run ' +
+          `"npx telstore restore ${shellArg(backupId)} -- tar xf -" if it is a plain tar ` +
+          'archive. Refused now rather than after the whole backup has been downloaded, which ' +
+          'is when tar would find out.',
+      )
+    }
+
+    log(`Backup ${backupId}`)
+    log(`Name   ${manifest.name} (${plural(manifest.chunks.length, 'chunk')}, ${formatBytes(manifest.size)})`)
+    log(`From   ${describeChat(chat)}`)
+    log(`Into   ${childArgv.join(' ')}\n`)
+
+    const tmp = tempDirFor(configDir)
+    await fs.mkdir(tmp, { recursive: true })
+
+    // Before the first download. A command that cannot start costs nothing here and a whole
+    // chunk if it is started later.
+    child = spawn(childArgv, { stdio: ['pipe', 'inherit', 'inherit'] })
+    onChild(child.kill)
+
+    // Raced against every step below rather than checked between them: a command that dies
+    // two minutes into an 1800MB download leaves that download with nowhere to go, and
+    // finishing it first would be eight minutes spent on bytes nobody will read. Always
+    // throws, so it can never be the value a race resolves with. The no-op catch is for the
+    // window before the first race attaches a handler, exactly as `spawnProducer` does it.
+    const gone = child.exited.then(
+      ({ code, signal }) => {
+        throw stoppedReading(childArgv, written, manifest.size, { code, signal })
+      },
+      (err) => {
+        throw err
+      },
+    )
+    gone.catch(() => {})
+
+    // An 'error' event with nothing listening for it is an uncaught exception, and stdin's own
+    // failures do not all arrive inside a window `writeChunkTo` is watching: `write()` returning
+    // true means the pipe took the bytes into its buffer, so the EPIPE belonging to the last
+    // write of a chunk can surface after that call has returned and its listeners have come off.
+    // This used to be absorbed by accident — the `pipeline` `writeChunkTo` was built on left its
+    // handlers on this stream for the life of the run — and absorbing it on purpose is not
+    // enough either: a pipe that failed means the command did not get what was written into it,
+    // which is the difference between a restore and a plausible-looking one. So it is latched,
+    // and read in two places: before every chunk after the first, and once the child's exit is
+    // in hand.
+    let pipeFailure = null
+    child.stdin.on('error', (err) => {
+      pipeFailure ??= err
+    })
+
+    const progress = createProgress({
+      total: manifest.size,
+      label: `Chunk 1/${manifest.chunks.length}`,
+      write: warn,
+    })
+
+    try {
+      for (const chunk of manifest.chunks) {
+        // Asked before the next chunk rather than only at the end, because by then the run has
+        // known for a whole download: a pipe that has gone will not take this chunk either, and
+        // fetching 1800MB to push into it is eight minutes spent on bytes nobody will read. It is
+        // also the only thing that ends a run whose command closed its stdin at a chunk boundary
+        // and did not exit — `gone` never settles for a command that is still running, and
+        // nothing here puts a deadline on waiting for one.
+        //
+        // `pipeFailure` alone is not enough here: it is latched from an 'error' event, and a
+        // command that closes its end of the pipe quietly between two chunks — without ever
+        // writing into it again to provoke one — leaves `pipeFailure` null. `writeChunkTo`'s own
+        // probe would still catch that, but only once it is pumping — after this chunk has
+        // already been downloaded for nothing. Checking the flags directly is what the probe
+        // itself checks, asked a chunk earlier.
+        if (pipeFailure !== null || child.stdin.destroyed || child.stdin.writableEnded) {
+          // A real 'error' means some of what telstore already wrote may never have arrived.
+          // A destroyed-or-ended pipe with no error behind it means the opposite: everything
+          // written so far was taken cleanly, and the command simply stopped reading before the
+          // backup ended — the same ending `stoppedReading` already says correctly.
+          throw pipeFailure !== null
+            ? pipeFailed(childArgv, written, pipeFailure)
+            : stoppedReading(childArgv, written, manifest.size)
+        }
+
+        const file = path.join(tmp, `${backupId}-${chunk.i}.chunk`)
+
+        // Said before the open, for the reason the upload direction says it before its own:
+        // the handler has to hold the name for the whole window in which the file can exist.
+        onTempChunk(file)
+
+        const handle = await fs.open(file, 'w+')
+
+        try {
+          progress.setLabel(`Chunk ${chunk.i + 1}/${manifest.chunks.length}`)
+
+          // getMessage and downloadChunk go over the network, and either can reject on its own
+          // — a stall timeout, a FLOOD_WAIT that outlived its retries, any teleproto error —
+          // which is a different ending from `gone` losing the race: `gone` only ever fires
+          // once the child has already exited, and its own throw already says so. A rejection
+          // from the network call itself used to propagate raw, saying nothing about the
+          // prefix already handed to the command — the same omission `networkFailed` closes for
+          // both calls, through the one `received()` wording rather than a fifth variant of it.
+          const message = await Promise.race([
+            getMessage(client, chat, chunk.msgId).catch((err) => {
+              throw networkFailed(err, childArgv, written)
+            }),
+            gone,
+          ])
+
+          if (!message) {
+            throw new Error(
+              `Missing chunk ${chunk.i + 1}/${manifest.chunks.length}: message ${chunk.msgId} ` +
+                `is no longer in ${chat}. This backup cannot be restored. ` +
+                `${received(childArgv, written)}`,
+            )
+          }
+
+          const { sha256, size } = await Promise.race([
+            downloadChunk(client, message, handle, 0, progress.advance, {
+              retryOptions: { ...retryOptions, onRetry },
+              concurrency: settings.downloadConcurrency,
+            }).catch((err) => {
+              throw networkFailed(err, childArgv, written)
+            }),
+            gone,
+          ])
+
+          if (size !== chunk.size) {
+            throw new Error(
+              `Chunk ${chunk.i + 1} arrived with ${size} bytes and the manifest records ` +
+                `${chunk.size} — mismatch. ${received(childArgv, written)}`,
+            )
+          }
+
+          if (sha256 !== chunk.sha256) {
+            throw new Error(
+              `Chunk ${chunk.i + 1} has a sha256 that does not match the manifest. ` +
+                `${received(childArgv, written)}`,
+            )
+          }
+
+          // Only now, and this line is the guarantee: everything above it is what makes the
+          // difference between handing a command the backup and handing it whatever arrived.
+          //
+          // The write's own failure is worded here rather than reported as it arrived, because
+          // a dead pipe is not a sentence anybody can act on: "write EPIPE" names the symptom,
+          // and what happened is what `stoppedReading` says — minus the exit code, which this
+          // path has not got. Usually it is not needed: measured on node 22, a command that
+          // dies mid-chunk loses this race to `gone`, which is one microtask behind the child's
+          // exit while the write has a read to finish and a latch to notice. What is left for
+          // this catch is the ending where no exit status is coming at all — a command that
+          // closes its end of the pipe and goes on working, `head -c 10` inside a shell that
+          // has more to do — and even there the write is only a mechanism that *can* report it,
+          // not one that always does: once `head` has read its ten bytes and stopped, a
+          // remainder small enough to sit entirely in the OS pipe buffer is accepted by
+          // `write()` without complaint — the kernel took it, nobody will ever read it, and this
+          // catch never fires. Measured 2026-09-10: a 19.8KB remainder behind that same `head -c
+          // 10` reports a restore that never happened; a 391KB one is refused correctly.
+          // `docs/design/data-integrity.md` has both numbers and what binds the guarantee.
+          //
+          // Which failure this was is asked of writeChunkTo, which says so by type:
+          // DestinationGoneError is the far end and nothing else is. Asking the pipe instead —
+          // `child.stdin.destroyed` — would have been one inference too many: a read error on
+          // the chunk file can leave the same trace, and telstore would then blame tar for a
+          // fault of its own. A code on the error is no better, because a far end that has gone
+          // reports itself as EPIPE, as ECONNRESET or as a premature close depending on when
+          // it went, and a list of spellings is how such a check quietly stops matching.
+          const pumping = writeChunkTo(child.stdin, handle, size, { onProgress: handed }).catch(
+            (err) => {
+              if (err instanceof DestinationGoneError) {
+                throw stoppedReading(childArgv, written, manifest.size)
+              }
+
+              throw err
+            },
+          )
+
+          await Promise.race([pumping, gone])
+        } finally {
+          await discardChunkFile(handle, file, { writeErr, chunkSize: manifest.chunkSize })
+
+          // Unsaid whether the removal worked or not: if it did there is nothing left to
+          // remove, and if it did not, discardChunkFile has already named the file on stderr.
+          onTempChunk(null)
+        }
+      }
+    } finally {
+      // Ended here rather than after the loop, so a failure mid-chunk still leaves the cursor
+      // on a fresh line and "Error: ..." does not land on top of the bar.
+      progress.finish()
+    }
+
+    // Unreachable if every chunk verified and every write moved the length it was given, which
+    // is why it is worth keeping: it is the one check that does not trust the ones above it,
+    // and it is counted from the bytes that went into the pipe rather than from the manifest.
+    if (written !== manifest.size) {
+      throw new Error(
+        `telstore wrote ${written} bytes into ${childArgv[0]} and the manifest records ` +
+          `${manifest.size}. Refusing to report a restore it cannot account for.`,
+      )
+    }
+
+    // The command has had every byte the manifest names; EOF is how it is told so.
+    child.stdin.end()
+
+    const { code, signal } = await child.exited
+    ended = true
+
+    // Before the exit code is read for what it says, because it cannot answer this: a command
+    // that exited 0 with the tail of the backup still sitting in a pipe it had stopped reading
+    // exited 0 all the same. The cost of checking is a restore refused in the one case where a
+    // command read every byte and left before telstore closed the pipe behind it; the cost of
+    // not checking is a backup reported as restored that the command never finished receiving,
+    // and this project pays the first to avoid the second.
+    if (pipeFailure !== null) {
+      throw pipeFailed(childArgv, written, pipeFailure, { code, signal })
+    }
+
+    if (code !== 0 || signal !== null) {
+      throw new Error(
+        signal !== null
+          ? `${childArgv[0]} was killed by ${signal} after receiving all ` +
+            `${formatBytes(written)}. telstore is not reporting a restore on its behalf.`
+          : `${childArgv[0]} exited ${code} after receiving all ${formatBytes(written)}. ` +
+            'telstore is not reporting a restore on its behalf: every byte was correct and ' +
+            'the command still did not finish.',
+      )
+    }
+
+    log(`\nDone. telstore wrote ${formatBytes(written)} into ${childArgv[0]}, which exited 0.`)
+
+    return { id: backupId, size: written, chunks: manifest.chunks.length }
+  } finally {
+    // A run that fell over mid-chunk leaves the command alive and blocked on a pipe nothing is
+    // going to write to again. Destroying the pipe is what turns that wait into something it
+    // can act on; the kill is for a command that is not waiting on stdin at all.
+    if (child && !ended) {
+      child.stdin.destroy()
+      child.kill()
+    }
+
+    onChild(null)
+
+    await closeQuietly(client, disconnect, (err) =>
+      warn(`\nWarning: could not close the Telegram connection: ${err.message}\n`),
+    )
+  }
+}
+
+// What the command got before this went wrong, in every message about a chunk that did not.
+// A person deciding what to do next needs to know the difference between "it has half of my
+// archive" and "it has nothing".
+function received(childArgv, written) {
+  return written === 0
+    ? `${childArgv[0]} was given nothing.`
+    : `${childArgv[0]} had already been given ${formatBytes(written)}, which was correct but ` +
+      'is not the whole backup — whatever it did with that is incomplete.'
+}
+
+// getMessage or downloadChunk rejecting is the same class of failure as the two chunk-mismatch
+// branches above — the run stops mid-loop, not at a boundary the command already knows about —
+// so it gets the same treatment rather than propagating whatever teleproto's error happened to
+// say. `err.message` alone was measured reading "FAIL TIMEOUT: no response from Telegram after
+// 3 attempts" while the command had already been handed a correct 195KB prefix and written it
+// to disk; not one word about that in the raw error.
+function networkFailed(err, childArgv, written) {
+  return new Error(`${err.message}. ${received(childArgv, written)}`)
+}
+
+// A pipe that failed, which is the one ending the command's own exit code cannot speak for, and
+// one sentence for both the places that report it: the chunk boundary, where there is no exit
+// status yet and may never be one, and after the child has exited.
+function pipeFailed(childArgv, written, err, exit = null) {
+  const what =
+    exit === null
+      ? `${childArgv[0]}'s stdin failed`
+      : `${childArgv[0]} exited ${exit.signal !== null ? `on ${exit.signal}` : String(exit.code)}` +
+        ', but its stdin failed first'
+
+  return new Error(
+    `${what} (${err.message}) — so some of the ${formatBytes(written)} telstore wrote into it ` +
+      'never arrived. Not reporting a restore on that. Nothing in the chat changed.',
+  )
+}
+
+// A command that is gone while there are bytes left. Exit 0 is included on purpose: `head -c
+// 10` exits 0 having read ten bytes of a gigabyte, and reporting that as a restore would be
+// the confident wrong answer. Measured, not assumed — see the probe table in the spec.
+//
+// `exit` is null on the one ending where no exit status is coming: the command closed its end
+// of the pipe and went on working. What happened is the same thing either way, so it is the
+// same sentence, and only the clause naming the exit code is missing — waiting for one there
+// would mean waiting without a deadline on a command that may never exit at all.
+function stoppedReading(childArgv, written, total, exit = null) {
+  const how =
+    exit === null
+      ? 'stopped reading'
+      : exit.signal !== null
+        ? `was killed by ${exit.signal}`
+        : `exited ${exit.code}`
+
+  return new Error(
+    `${childArgv[0]} ${how} with ${formatBytes(written)} of ${formatBytes(total)} written into ` +
+      'it, so it did not receive the backup. Nothing in the chat changed.',
+  )
+}

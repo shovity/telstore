@@ -22,6 +22,20 @@
   takes **no value** —
   a token on the command line sits in `ps` and in shell history, so it is pasted at a prompt
   that does not echo. `login` refuses a positional argument rather than ignoring one.
+- **`--out` grows a second meaning for `tarx`, and it is refused rather than stretched to fit
+  the general form.** For a file restore `--out <path>` is where the file is written; `tarx`
+  writes no file of its own, so `tarxLine` turns `--out <path>` into `tar`'s own `-C <path>` —
+  the directory it extracts into. `telstore restore <id> -- <command>` refuses `--out` outright
+  instead of guessing what it should mean there: that path has no file for `--out` to place,
+  and a flag that silently does nothing for the general form it sits right beside in `--help`
+  is a flag nobody could predict without reading the source.
+- **`--verbose` now reaches a child's argv, not only teleproto's connection log.** `tarc` and
+  `tarx` fold a `v` into the `tar` invocation they expand to — `czf`/`xzf` become
+  `czvf`/`xzvf` — exactly when `--verbose` is set, which makes this the one flag whose effect
+  crosses out of telstore and into a spawned process's own command line. It stays one setting
+  with one meaning even so: "show more than telstore shows by default", not a second flag that
+  happens to piggyback on the first. `docs/design/terminal-prompts.md` has why it is allowed
+  into that argv only there, rather than by default.
 - The `--chunk-size` refusal keys off the *source* of the size, not its presence: a config
   `chunkSize` says what to use when nobody asks, so a resumed backup keeps its own size; only
   the flag is somebody asking. `resolveSettings` returns `source(key)` for this, and throws on
@@ -33,6 +47,41 @@
   60s deadline — 32 upload slots need 2.1 Mbps, 64 need 4.4. That floor is why the upload
   default is 32 and not the 64 that measured marginally faster: a slow link must never be told
   it stalled. `src/chunking.js` carries the measurements.
+- **`tarc`'s `c` always means gzip, with no flag to turn it off, and the numbers are why.**
+  Measured on one machine, 8 cores, warm page cache, 306MB of highly compressible text, a burst
+  of about ten seconds: `tar cf -` read the tree at ~227 MB/s with nothing to slow it down;
+  `tar czf -` read at ~30 MB/s and emitted ~5.4 MB/s at a 5.8x ratio, against a measured
+  Telegram upload ceiling of ~9.5 MB/s. End to end that is ~10s for the gzipped stream against
+  ~32s for the same bytes uncompressed — the plain stream spends almost the whole run waiting
+  on the upload ceiling, while the gzipped one spends most of it on CPU the upload was never
+  going to use anyway. So compression wins roughly 3x where the data compresses and costs only
+  CPU where it does not, because the upload ceiling is the limit again either way — which is
+  also why `tarcLine` exposes no flag to disable it: the case where gzip loses is the case
+  where it barely loses. **The conditions matter more than the ratio.** A burst of about ten
+  seconds, 8 cores, warm cache and text that compresses unusually well is not a sustained
+  measurement — this project has already been burned once for quoting a burst as a throughput
+  ceiling, the same mistake the 32-vs-64 concurrency numbers above exist to avoid repeating —
+  and a full 1800MB chunk on one core, not eight, is what would actually settle the ceiling.
+  `--` is still how someone reaches `zstd`, `xz`, or no compression at all; none of this
+  changes what that path can do.
+- **`tar czf -` carries no timestamp, so a `tarc` archive of an unchanged tree is the same bytes
+  every time — and the tree is still what a test must compare.** The e2e skill and the tar
+  shortcuts spec both said the opposite: that gzip stamps an mtime into its header, so two runs
+  over one tree cannot be compared byte for byte. Measured 2026-09-10, GNU tar 1.35 with gzip
+  1.12 on Linux 6.8, three runs of `tar czf - ./tree` over 35MB of random bytes more than a
+  second apart: identical sha256 all three times, identical length, and the gzip header reads
+  `1f 8b 08 00 00000000 00 03` — FLG with no FNAME and MTIME **zero**. RFC 1952 reads a zero
+  MTIME as "no time available", and that is what gzip writes when its input is a pipe, because
+  there is no file to stat. `gzip -c <file>` does stamp one (`FLG=08`, a real MTIME), which is
+  where the belief came from; `tar czf <file>.tgz` does not, because tar still feeds the
+  compressor on stdin. So the stated reason was wrong for the one form `tarc` actually runs.
+  **The instruction it was given for is still right, for two reasons that survive the
+  correction:** the archive is not what anybody restores — a comparison of archive bytes passes
+  on an archive that extracts to the wrong tree and fails on a tar or gzip version difference
+  that is nothing to do with telstore — and this reproducibility is one `tar`, one `gzip` and one
+  platform wide. bsdtar, busybox tar and `--use-compress-program` were not measured, and an
+  archive comparison that happens to pass here would be a test that breaks on somebody else's
+  machine for a reason the failure message would not explain.
 - Errors are reported against where the value came from: `Invalid --upload-concurrency: "0"`
   for a flag, `Invalid uploadConcurrency in ~/.telstore/config.json: "0"` for a stored one.
   Same reasoning killed *"run again without `--chat`"* — useless to someone whose destination

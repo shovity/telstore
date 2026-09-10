@@ -294,6 +294,15 @@ test('Ctrl-C during a batch restore names what is already finished', () => {
   assert.match(message, /only the ids that are left/)
 })
 
+test('Ctrl-C on a restore into a command says what cannot be taken back', () => {
+  const message = interruptMessage('restore', { stream: true, backupId: 'telstore-1' })
+
+  assert.match(message, /Nothing in the chat changed/)
+  assert.match(message, /incomplete/)
+  // The file restore's wording promises a resume. This one must not borrow it.
+  assert.doesNotMatch(message, /carry on/)
+})
+
 test('interrupting anything else just says it stopped', () => {
   assert.equal(interruptMessage('login'), '\nStopped.\n')
   assert.equal(interruptMessage(null), '\nStopped.\n')
@@ -499,4 +508,106 @@ test('--help wins over every terminator check, in any of its spellings', () => {
 // command for `help` to refuse the way `verify` and the rest do.
 test('the help subcommand wins over a terminator too', () => {
   assert.equal(route(['help', '--', 'tar', 'cf']).command, 'help')
+})
+
+// The test that matters most: the shortcut IS the long form. Anything else it could be —
+// a lookalike that drifts the day someone edits one of them — is the bug this asserts away.
+test('tarc expands into exactly the -- line a person could have typed', () => {
+  const short = route(['tarc', 'a.tar.gz', './x', './y'])
+  const long = route(['a.tar.gz', '--', 'tar', 'czf', '-', './x', './y'])
+
+  assert.equal(short.command, long.command)
+  assert.deepEqual(short.args, long.args)
+  assert.deepEqual(short.childArgv, long.childArgv)
+  assert.equal(short.shortcut, 'tarc')
+  assert.equal(long.shortcut, null)
+})
+
+test('the stored name is run through the gzip naming rule', () => {
+  assert.deepEqual(route(['tarc', 'a.tar', './x']).args, ['a.tar.gz'])
+  assert.deepEqual(route(['tarc', 'march', './x']).args, ['march.tar.gz'])
+})
+
+// For tarc, tar writes its listing to stderr, where the progress bar lives, so it is only
+// invited into a mode that is already noisy by request. This is the upload direction only —
+// tarx's `xzvf` writes its listing to stdout instead, see docs/design/terminal-prompts.md.
+test('--verbose adds v to tar and still sets the flag telstore reads', () => {
+  const parsed = route(['tarc', '--verbose', 'a.tar.gz', './x'])
+
+  assert.deepEqual(parsed.childArgv, ['tar', 'czvf', '-', './x'])
+  assert.equal(parsed.options.verbose, true)
+})
+
+test('flags that belong to telstore still reach telstore', () => {
+  const parsed = route(['tarc', '--chat', '@store', '--note', 'march', 'a.tar.gz', './x'])
+
+  assert.equal(parsed.options.chat, '@store')
+  assert.equal(parsed.options.note, 'march')
+  assert.deepEqual(parsed.childArgv, ['tar', 'czf', '-', './x'])
+})
+
+test('tarc with a name and nothing to archive is refused', () => {
+  assert.throws(() => route(['tarc', 'a.tar.gz']), /Nothing to archive/)
+})
+
+test('tarc with no name at all is refused', () => {
+  assert.throws(() => route(['tarc']), /Missing a name/)
+})
+
+// Two commands on one line is a line with no answer, so it gets a refusal rather than a
+// guess about which one was meant.
+test('tarc cannot be followed by -- : it already is the command', () => {
+  assert.throws(() => route(['tarc', 'a.tar.gz', './x', '--', 'tar', 'cf', '-', './x']),
+    /already is the command/)
+})
+
+test('a file literally named tarc still uploads as ./tarc', () => {
+  const parsed = route(['./tarc'])
+
+  assert.equal(parsed.command, 'upload')
+  assert.deepEqual(parsed.args, ['./tarc'])
+})
+
+test('tarx expands into the restore -- line a person could have typed', () => {
+  const short = route(['tarx', 'telstore-20260905-7f3a91'])
+  const long = route(['restore', 'telstore-20260905-7f3a91', '--', 'tar', 'xzf', '-'])
+
+  assert.equal(short.command, 'restore')
+  assert.deepEqual(short.args, long.args)
+  assert.deepEqual(short.childArgv, long.childArgv)
+  assert.equal(short.shortcut, 'tarx')
+})
+
+test('tarx --verbose adds v', () => {
+  assert.deepEqual(route(['tarx', '--verbose', 'id-1']).childArgv, ['tar', 'xzvf', '-'])
+})
+
+// --out means "where the files go", which for tar is -C. On this path telstore writes no file
+// of its own, so there is nothing else for it to mean.
+test('tarx --out becomes tar -C', () => {
+  assert.deepEqual(route(['tarx', '--out', './here', 'id-1']).childArgv,
+    ['tar', 'xzf', '-', '-C', './here'])
+})
+
+test('tarx needs an id, and exactly one', () => {
+  assert.throws(() => route(['tarx']), /Missing backup id/)
+  assert.throws(() => route(['tarx', 'id-1', 'id-2']), /one backup id/)
+})
+
+// One command reads one stream, the mirror of the rule the upload direction already keeps.
+test('a general restore into a command takes one id too', () => {
+  assert.throws(() => route(['restore', '--', 'tar', 'xf', '-']), /Missing backup id/)
+  assert.throws(() => route(['restore', 'a', 'b', '--', 'tar', 'xf', '-']), /one backup id/)
+})
+
+// A flag that silently does nothing is worse than a flag that is refused.
+test('--out is refused for a restore into a command, which writes no file', () => {
+  assert.throws(
+    () => route(['restore', 'id-1', '--out', './x', '--', 'tar', 'xf', '-']),
+    /writes no file/,
+  )
+})
+
+test('the message for a subcommand that cannot take a command names both that can', () => {
+  assert.throws(() => route(['list', '--', 'tar', 'xf', '-']), /npx telstore restore/)
 })
