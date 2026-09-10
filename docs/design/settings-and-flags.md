@@ -64,6 +64,24 @@
   and a full 1800MB chunk on one core, not eight, is what would actually settle the ceiling.
   `--` is still how someone reaches `zstd`, `xz`, or no compression at all; none of this
   changes what that path can do.
+- **`tar czf -` carries no timestamp, so a `tarc` archive of an unchanged tree is the same bytes
+  every time — and the tree is still what a test must compare.** The e2e skill and the tar
+  shortcuts spec both said the opposite: that gzip stamps an mtime into its header, so two runs
+  over one tree cannot be compared byte for byte. Measured 2026-09-10, GNU tar 1.35 with gzip
+  1.12 on Linux 6.8, three runs of `tar czf - ./tree` over 35MB of random bytes more than a
+  second apart: identical sha256 all three times, identical length, and the gzip header reads
+  `1f 8b 08 00 00000000 00 03` — FLG with no FNAME and MTIME **zero**. RFC 1952 reads a zero
+  MTIME as "no time available", and that is what gzip writes when its input is a pipe, because
+  there is no file to stat. `gzip -c <file>` does stamp one (`FLG=08`, a real MTIME), which is
+  where the belief came from; `tar czf <file>.tgz` does not, because tar still feeds the
+  compressor on stdin. So the stated reason was wrong for the one form `tarc` actually runs.
+  **The instruction it was given for is still right, for two reasons that survive the
+  correction:** the archive is not what anybody restores — a comparison of archive bytes passes
+  on an archive that extracts to the wrong tree and fails on a tar or gzip version difference
+  that is nothing to do with telstore — and this reproducibility is one `tar`, one `gzip` and one
+  platform wide. bsdtar, busybox tar and `--use-compress-program` were not measured, and an
+  archive comparison that happens to pass here would be a test that breaks on somebody else's
+  machine for a reason the failure message would not explain.
 - Errors are reported against where the value came from: `Invalid --upload-concurrency: "0"`
   for a flag, `Invalid uploadConcurrency in ~/.telstore/config.json: "0"` for a stored one.
   Same reasoning killed *"run again without `--chat`"* — useless to someone whose destination

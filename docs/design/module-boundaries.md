@@ -103,6 +103,13 @@
   `state.js` beside `stateDir`, not in the upload command: they answer the same question — what
   has this machine got of telstore's on it — and `status` has to be able to ask it without
   importing `upload-stream.js`, which would drag a second upload loop and teleproto behind it.
+  **One chunk at a time, measured on the restore direction against a real account** (2026-09-10,
+  `tarx` of a 3-chunk 35MB backup cut at 15MB, `~/.telstore/tmp` sampled 60 times at 0.4s):
+  never more than one file in the directory and never more than 15,728,640 bytes in it — exactly
+  one chunk — with the directory back to empty when the run ended. The upload direction was
+  measured the same way on 2026-09-09. Neither measurement went near the 1800MB default, so what
+  is confirmed is the *shape* — one chunk borrowed, never two — and not the behaviour of a
+  machine whose disk is the size of one.
 - `bin/telstore.js` imports each command inside its own `switch` arm. Nine static imports made
   every run pay for teleproto (~0.4s, 50MB) including `--help`, `config`, `logout` and `token`;
   those now start in 0.06s. `src/cli.js` stays static because every run parses arguments.

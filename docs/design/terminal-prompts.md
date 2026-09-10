@@ -107,6 +107,31 @@ downloads this process already owns and a prefix of bytes some command has alrea
 straight through to the branch every ordinary, nothing-to-unwind command takes — the line is
 printed and the process leaves on the spot. The one thing that exit still has to do is
 `stopChild()`: a synchronous `kill()` on the child, called from inside `leave()` before
-anything else runs. Leaving without it would let `tar` go on writing files into somebody's
-directory for as long as it takes the kernel to notice its parent is gone — telstore would have
-said it stopped while the command it spawned had not.
+anything else runs. Without it telstore would have said it stopped while the command it spawned
+had not.
+
+**The sentence above used to name `tar` as the command that would keep writing, and a real
+account says that is the one command it is not.** Measured 2026-09-10 in the throwaway channel
+`telstore e2e`, GNU tar 1.35 / gzip 1.12 on Linux 6.8, a 200MB `tarx` cut into 30MB chunks, the
+signal sent to the telstore pid alone and never to the process group — a group signal would
+reach the child directly and measure nothing about this function:
+
+| what was signalled | `stopChild()` runs? | the child, polled every 500ms for 10s afterwards |
+| --- | --- | --- |
+| `SIGINT` to telstore, mid-restore, `tar xzf -` running | yes | gone within 132ms |
+| `SIGKILL` to telstore, same point, same command | no — nothing can run | **also gone within 132ms**, of its own accord: `gzip: stdin: unexpected end of file` / `tar: Unexpected EOF in archive` |
+| `SIGINT` to telstore, child `sleep 600` (never reads stdin) | yes | gone within 134ms |
+| `SIGKILL` to telstore, child `sleep 600` | no | **still running 2m09s later**, reparented to init |
+
+So the first row on its own is not evidence of anything: `tar xzf -` dies when the pipe closes
+whether or not anything kills it, because a truncated gzip stream is an error it reports
+immediately. The third and fourth rows are the evidence, and they are the reason the function
+is worth its lines — a command that does not read its stdin, or goes on working after EOF, is
+orphaned by a telstore that leaves without killing it. The orphan also inherits telstore's
+stdout and stderr and holds those pipes open: in the fourth row the harness's own `close` event
+on the telstore process did not fire for 2m11s, until the orphan was killed by hand, so
+whatever ran telstore is left waiting on a process that is already dead.
+
+What the measurement could not see: only Linux, only one `tar`, and nothing about a child that
+ignores `SIGTERM` — `kill()` sends the default signal and this run never arranged a command that
+refuses it.
