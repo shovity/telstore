@@ -54,11 +54,15 @@
   destination, { end: false })` is required because a command's stdin has to survive past the
   end of one chunk to receive the next, but `{ end: false }` is also what stops `pipeline`'s own
   cleanup from ever running: it leaves its `'error'`, `'close'`, `'finish'` and `'end'`
-  listeners on the destination for the life of the run. Measured on node 22: one listener added
-  per chunk, `MaxListenersExceededWarning` printed over the `\r` progress bar by the eleventh
-  chunk, and at `MAX_CHUNKS = 10_000` about 40,000 closures sitting on one emitter, each
-  retaining a finished pipeline's graph for as long as the process runs. Invisible to
-  `npm test` entirely, because every fixture restores two chunks.
+  listeners on the destination for the life of the run — one of each, so four listeners per
+  chunk on the destination `writeChunkTo` actually writes to, a child's stdin. (A `PassThrough`,
+  which is what the test fixtures use as a destination, only grows one handler per chunk there;
+  the count depends on the destination type, not on `pipeline` itself, so a reader who measures
+  a `PassThrough` and gets a smaller number has not found a second bug.) Measured on node 22
+  against a child's stdin: four listeners added per chunk, `MaxListenersExceededWarning` printed
+  over the `\r` progress bar by the eleventh chunk, and at `MAX_CHUNKS = 10_000` about 40,000
+  closures sitting on one emitter, each retaining a finished pipeline's graph for as long as the
+  process runs. Invisible to `npm test` entirely, because every fixture restores two chunks.
 
   Replacing `pipeline` meant owning what it did for free, and two things bit before the
   hand-rolled loop was right. First, `write()` on a destination that is already destroyed or

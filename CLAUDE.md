@@ -55,7 +55,7 @@ anything that row names** — not afterwards, and not only when something looks 
 | `src/manifest.js`, `src/state.js`, `src/chunking.js`, `src/config.js` | `docs/design/data-integrity.md` |
 | `src/commands/restore.js`, the resume scan | `docs/design/data-integrity.md` |
 | `src/commands/verify.js` | `docs/design/data-integrity.md` |
-| `src/commands/upload-stream.js`, `src/stream.js`, the stream rollback | `docs/design/data-integrity.md` |
+| `src/commands/upload-stream.js`, `src/stream.js`, the stream rollback | `docs/design/data-integrity.md`, `docs/design/module-boundaries.md` |
 | `src/commands/restore-stream.js`, the restore rollback-free path | `docs/design/data-integrity.md` |
 | `src/commands/status.js`, `src/shell.js`, any command telstore prints to be pasted | `docs/design/data-integrity.md` |
 | `src/stall.js`, `src/retry.js`, anything that waits on the network | `docs/design/stalls-and-retries.md` |
@@ -66,7 +66,7 @@ anything that row names** — not afterwards, and not only when something looks 
 | `src/settings.js`, `src/cli.js`, `src/tar.js`, `src/commands/config.js`, any flag | `docs/design/settings-and-flags.md` |
 | `src/caption.js`, `src/commands/list.js`, anything the chat shows | `docs/design/captions.md` |
 | `src/client.js`, `src/uploader.js`, `src/downloader.js`, `bin/telstore.js` | `docs/design/module-boundaries.md` |
-| `src/spawn.js`, the temp chunks under `~/.telstore/tmp` | `docs/design/module-boundaries.md` |
+| `src/spawn.js`, the temp chunks under `~/.telstore/tmp` | `docs/design/module-boundaries.md`, `docs/design/data-integrity.md` |
 | `src/prompt.js`, `src/confirm.js`, `src/progress.js`, anything a terminal draws | `docs/design/terminal-prompts.md` |
 | the SIGINT handler in `bin/telstore.js`, any abort a command hands out | `docs/design/terminal-prompts.md` |
 | any call that hands an object to teleproto, or a test that fakes one | `docs/design/testing-blind-spots.md` |
