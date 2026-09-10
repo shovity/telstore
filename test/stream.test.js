@@ -421,3 +421,111 @@ test('a zero-length chunk writes nothing and does not throw', async () => {
 
   assert.equal(sink.readableLength, 0)
 })
+
+// `pipeline` never cleans up after a destination it was told not to end, so every chunk left
+// four handlers behind on the command's stdin: eight after four chunks, four distinct
+// MaxListenersExceededWarnings torn through the progress bar by the eleventh, and at
+// MAX_CHUNKS around 40,000 closures on one emitter, each retaining a finished pipeline's
+// graph for the whole run. Nothing above this could see it — every other fixture here, and
+// every one in test/restore-stream.test.js, is one or two chunks.
+test('a destination fed many chunks is left with no listeners of this function', async () => {
+  const { handle, dir } = await chunkFile(Buffer.alloc(1000, 1))
+  const sink = new PassThrough()
+
+  sink.resume()
+
+  const counts = () => ({
+    error: sink.listenerCount('error'),
+    close: sink.listenerCount('close'),
+    drain: sink.listenerCount('drain'),
+    finish: sink.listenerCount('finish'),
+    end: sink.listenerCount('end'),
+  })
+
+  await writeChunkTo(sink, handle, 1000)
+  const afterOne = counts()
+
+  await writeChunkTo(sink, handle, 1000)
+  await writeChunkTo(sink, handle, 1000)
+
+  assert.deepEqual(counts(), afterOne, 'a third chunk must not cost more listeners than the first')
+  assert.deepEqual(afterOne, { error: 0, close: 0, drain: 0, finish: 0, end: 0 })
+
+  await handle.close()
+  await fs.rm(dir, { recursive: true, force: true })
+})
+
+// `write()` returning true means the destination took the bytes into its own buffer, not that
+// they reached whatever is on the far end, so the EPIPE belonging to the last write of a chunk
+// can arrive after the loop has run out of bytes to check it against. Reporting that chunk as
+// one that went over is how a caller's running total comes to include bytes nobody received.
+test('a destination that fails after the last byte was handed over is still a failure', async () => {
+  const { handle, dir } = await chunkFile(Buffer.alloc(1000, 1))
+  const sink = new Writable({
+    write(_bytes, _encoding, done) {
+      done()
+      process.nextTick(() => sink.destroy(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })))
+    },
+  })
+
+  await assert.rejects(() => writeChunkTo(sink, handle, 1000), /EPIPE/)
+
+  await handle.close()
+  await fs.rm(dir, { recursive: true, force: true })
+})
+
+// A destination that has already failed must not be handed the next buffer, and what the
+// failure costs the caller is the reason: the bytes this function reports through onProgress are
+// what the caller's running total and its failure message are built from, so one buffer written
+// into a pipe that had already gone would be 64KB the message claims and nothing received.
+//
+// Twice over, because a failure can reach this loop in two different waits and one check does
+// not cover both: while it is waiting for a destination that would not take the last buffer, and
+// while it is waiting for the next read from a destination that took it and died afterwards.
+async function pumpInto(sink, onProgress) {
+  const { handle, dir } = await chunkFile(Buffer.alloc(200_000, 1))
+
+  await assert.rejects(() => writeChunkTo(sink, handle, 200_000, { onProgress }), /EPIPE/)
+
+  await handle.close()
+  await fs.rm(dir, { recursive: true, force: true })
+}
+
+test('a destination that has failed is handed no further buffers', async () => {
+  const refused = []
+  // Small highWaterMark: the first write is not acknowledged, so the loop is inside its drain
+  // wait when the failure arrives.
+  const refusing = new Writable({
+    highWaterMark: 1024,
+    write(bytes, _encoding, done) {
+      refused.push(bytes.length)
+      done(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }))
+    },
+  })
+
+  let reportedToRefusing = 0
+  await pumpInto(refusing, (bytes) => (reportedToRefusing += bytes))
+
+  assert.equal(refused.length, 1, `expected one write, the destination was given ${refused.length}`)
+  assert.equal(reportedToRefusing, refused[0])
+
+  const accepted = []
+  // A highWaterMark wide enough that the write is acknowledged at once, so the loop is waiting
+  // on the next read — not on a drain — when the far end goes.
+  const dyingAfter = new Writable({
+    highWaterMark: 1_000_000,
+    write(bytes, _encoding, done) {
+      accepted.push(bytes.length)
+      done()
+      process.nextTick(() =>
+        dyingAfter.destroy(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })),
+      )
+    },
+  })
+
+  let reportedToDying = 0
+  await pumpInto(dyingAfter, (bytes) => (reportedToDying += bytes))
+
+  assert.equal(accepted.length, 1, `expected one write, the destination was given ${accepted.length}`)
+  assert.equal(reportedToDying, accepted[0])
+})

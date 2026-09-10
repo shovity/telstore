@@ -1,6 +1,4 @@
 import { promises as fs } from 'node:fs'
-import { Transform } from 'node:stream'
-import { pipeline } from 'node:stream/promises'
 
 import { formatBytes } from './progress.js'
 
@@ -123,41 +121,121 @@ export class ChunkReader {
   }
 }
 
-// The other direction from ChunkReader, and unlike it this one can use the stream library as
-// it comes. ChunkReader is hand-rolled because it has to stop at a chunk boundary and keep
-// what it did not take; here the whole file is wanted, in order, and `pipeline` already does
-// the two things that matter: it honours backpressure, so a chunk is never buffered in this
-// process, and it rejects when the destination fails instead of going quiet.
+// What a destination that has gone away is reported as, and a class rather than a message so
+// the caller can tell it from this function's own refusal below without matching on words. The
+// restore direction has to say different things about a command that stopped reading and a
+// chunk file that came up short, and a check on the spelling of an error is a check that goes
+// quietly wrong the first time a node release rewords one.
+export class DestinationGoneError extends Error {
+  constructor(cause) {
+    super(
+      cause === null
+        ? 'The destination closed before the chunk was through.'
+        : `The destination stopped accepting bytes: ${cause.message}`,
+      { cause: cause ?? undefined },
+    )
+    this.name = 'DestinationGoneError'
+  }
+}
+
+// The other direction from ChunkReader, and hand-rolled for a reason of the same kind.
+// `pipeline` was the obvious choice here and the wrong one: `{ end: false }` is what lets a
+// command see one stream rather than one per chunk, and a destination that is never ended is a
+// destination `pipeline` never cleans up after — its error, close, finish and end handlers stay
+// on it for the life of the run. Measured on node 22: one handler per chunk on a PassThrough,
+// four on a child's stdin, MaxListenersExceededWarnings torn through the progress bar by the
+// eleventh chunk, and at MAX_CHUNKS around 40,000 closures on one emitter each retaining a
+// finished pipeline's graph. So the loop is explicit, and every listener it adds it takes off
+// again on the way out.
 //
-// `{ end: false }` is what makes a command see one stream rather than one per chunk. Measured
-// on node 22 rather than assumed, along with the fact that a FileHandle read stream opened
-// this way leaves the handle open for the next chunk: `autoClose: false`.
+// What the loop has to keep, because the destination is a command's stdin and not a file:
+// backpressure (a chunk can be 1800MB and must never sit whole in this process), a failure
+// that rejects rather than waits forever, the handle left usable for the next chunk
+// (`autoClose: false`, measured on node 22 rather than assumed), and the destination left open.
 export async function writeChunkTo(writable, handle, length, { onProgress = () => {} } = {}) {
   // `end: length - 1` is inclusive, so zero has to be turned away before it asks for byte -1.
   if (length === 0) return
 
   let seen = 0
+  let failure = null
+  let wake = null
 
-  const counted = new Transform({
-    transform(bytes, _encoding, done) {
-      seen += bytes.length
-      onProgress(bytes.length)
-      done(null, bytes)
-    },
-  })
+  // Latched for the whole pump rather than only while a drain is being waited for: a
+  // destination can fail in the middle of a write this loop is not waiting on, and a loop that
+  // noticed only at its next stall would go on reading into a pipe that has gone. `close`
+  // counts for as much as `error` — a command that leaves without a word closes its end and
+  // emits nothing else, and a drain that can never come is the hang this project refuses
+  // everywhere — so both of them wake the wait below as well as arming it.
+  const fail = (err) => {
+    failure ??= new DestinationGoneError(err ?? null)
+    if (wake) wake()
+  }
+  const onError = (err) => fail(err)
+  const onClose = () => fail(null)
+  const onDrain = () => {
+    if (wake) wake()
+  }
+
+  writable.on('error', onError)
+  writable.on('close', onClose)
+  writable.on('drain', onDrain)
 
   // Not a 'data' listener on the source: attaching one switches the stream to flowing mode and
-  // the backpressure this function exists to honour goes with it.
+  // the backpressure this function exists to honour goes with it. `for await` pulls instead, so
+  // nothing is read while a write is unacknowledged — and it is also what disposes of the read
+  // stream, on the way out of the loop and on a throw from inside it alike. Destroying it here
+  // by hand would be worse than redundant: measured on node 22, destroying a read stream opened
+  // this way closes the FileHandle under it whatever `autoClose` says, and the next chunk would
+  // then ask a closed handle for a stream.
   const source = handle.createReadStream({ start: 0, end: length - 1, autoClose: false })
 
-  await pipeline(source, counted, writable, { end: false })
+  try {
+    for await (const bytes of source) {
+      // At the top, because this is where a failure that landed while the loop was waiting —
+      // for a read, or for the drain below — is raised. Before the write and before the count,
+      // so a destination that has already gone is handed nothing more: the bytes reported here
+      // are what the caller's running total and its failure message are built from, and one
+      // buffer more would be up to 64KB the message claims and the destination never took.
+      if (failure !== null) throw failure
+
+      seen += bytes.length
+      onProgress(bytes.length)
+
+      // Handed over, not accepted: what this counts is what telstore wrote into the
+      // destination, which is as much as anything on this side can know. Whether the command
+      // on the far end ever read it is what its exit code answers.
+      //
+      // `failure === null` is what stops the wait outliving the thing it is waiting for: a
+      // drain that has already been overtaken by an error or a close is a drain that will never
+      // come, and waiting for it is the hang this project refuses everywhere. A failure that
+      // lands during the wait wakes it instead, and the check at the top of the next turn — or
+      // the one after the loop, on the last buffer — is where it is raised.
+      if (!writable.write(bytes) && failure === null) {
+        await new Promise((resolve) => {
+          wake = resolve
+        })
+        wake = null
+      }
+    }
+  } finally {
+    writable.off('error', onError)
+    writable.off('close', onClose)
+    writable.off('drain', onDrain)
+  }
+
+  // A failure latched on the last write, after the loop had no more bytes to check it against.
+  // Accepted is not delivered: `write()` returning true means the destination took the bytes
+  // into its own buffer, and the EPIPE from a far end that has gone can arrive after that. Those
+  // bytes never reached the command, so this is not a chunk that went over.
+  if (failure !== null) throw failure
 
   // `createReadStream` stops at the file's real end of data without complaining when `end`
-  // reaches past it, so a chunk file shorter than `length` makes the pipeline above resolve
-  // cleanly having moved too few bytes. That must not be read as success: the caller's running
-  // total is built from `length`, the size it was told to expect, not from what this function
-  // actually moved, so a short chunk here would become a truncated stream handed to somebody's
-  // tar and reported as a finished restore — the one thing this project refuses to do.
+  // reaches past it, so a chunk file shorter than `length` makes the loop above finish having
+  // moved too few bytes. That must not be read as success: the caller's running total is built
+  // from the size it was told to expect, so a short chunk here would become a truncated stream
+  // handed to somebody's tar and reported as a finished restore — the one thing this project
+  // refuses to do. This is the only failure this function raises on its own account; everything
+  // else that comes out of it belongs to the destination or to the file being read.
   if (seen !== length) {
     throw new Error(
       `The chunk file held ${seen} bytes, but ${length} were asked for — the chunk is ` +
