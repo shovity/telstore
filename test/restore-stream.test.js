@@ -320,6 +320,55 @@ test('a chunk message gone on the first chunk fails by name, and says the comman
   assert.deepEqual(child.bytes(), Buffer.alloc(0))
 })
 
+test('a network failure fetching a chunk says what the command already has', async () => {
+  const backup = fakeBackup()
+  const ws = await workspace()
+  const child = fakeChild()
+  // The reviewer's own measurement: a retry budget spent on silence, not a chunk that is gone
+  // or corrupt. No trailing period, the way withRetry's raw errors arrive.
+  const networkError = new Error('FAIL TIMEOUT: no response from Telegram after 3 attempts')
+  const { deps } = fakeChat(backup, child, ws, {
+    getMessage: async (_client, _peer, msgId) => {
+      await tick()
+      if (msgId === backup.manifest.chunks[1].msgId) throw networkError
+      return backup.messages.find((message) => message.id === msgId) ?? null
+    },
+  })
+
+  // Matching only the network error would pass even if the received() call were dropped, so
+  // the assertion pins the whole sentence — the same one the missing-chunk tests above pin,
+  // through the same helper rather than a fifth wording of its own.
+  await assert.rejects(
+    () => runRestoreStream(backup.id, ARGV, {}, deps),
+    /FAIL TIMEOUT: no response from Telegram after 3 attempts\. tar had already been given 4 B, which was correct but is not the whole backup — whatever it did with that is incomplete\./,
+  )
+
+  assert.deepEqual(child.bytes(), backup.content.subarray(0, 4))
+})
+
+test('a network failure downloading a chunk says what the command already has', async () => {
+  const backup = fakeBackup()
+  const ws = await workspace()
+  const child = fakeChild()
+  const networkError = new Error('FLOOD_WAIT_30: retries exhausted')
+  const { deps } = fakeChat(backup, child, ws, {
+    downloadChunk: async (_client, message, handle, offset, onProgress) => {
+      await tick()
+      if (message.id === backup.manifest.chunks[1].msgId) throw networkError
+      await handle.write(message.bytes, 0, message.bytes.length, offset)
+      onProgress?.(message.bytes.length)
+      return { sha256: sha(message.bytes), size: message.bytes.length }
+    },
+  })
+
+  await assert.rejects(
+    () => runRestoreStream(backup.id, ARGV, {}, deps),
+    /FLOOD_WAIT_30: retries exhausted\. tar had already been given 4 B, which was correct but is not the whole backup — whatever it did with that is incomplete\./,
+  )
+
+  assert.deepEqual(child.bytes(), backup.content.subarray(0, 4))
+})
+
 test('a command that stops reading early fails, even though it exited 0', async () => {
   const backup = fakeBackup()
   const ws = await workspace()

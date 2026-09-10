@@ -528,8 +528,9 @@ test('the stored name is run through the gzip naming rule', () => {
   assert.deepEqual(route(['tarc', 'march', './x']).args, ['march.tar.gz'])
 })
 
-// tar writes its listing to stderr, where the progress bar lives, so it is only invited into
-// a mode that is already noisy by request.
+// For tarc, tar writes its listing to stderr, where the progress bar lives, so it is only
+// invited into a mode that is already noisy by request. This is the upload direction only —
+// tarx's `xzvf` writes its listing to stdout instead, see docs/design/terminal-prompts.md.
 test('--verbose adds v to tar and still sets the flag telstore reads', () => {
   const parsed = route(['tarc', '--verbose', 'a.tar.gz', './x'])
 

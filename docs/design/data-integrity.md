@@ -138,6 +138,34 @@
   bytes — and the failure direction there is a refused restore, loud and re-runnable, rather
   than a backup reported restored that the command never finished taking.
 
+- **The guarantee above binds only when the unread remainder is larger than the OS pipe
+  buffer, and that is a real boundary, not an implementation gap to close.** Once every byte of
+  a chunk has entered the kernel's pipe buffer, `write()` returns success — the kernel took the
+  bytes, and nothing on telstore's side of the pipe can find out afterwards whether a process
+  holding the read end ever looked at them before exiting 0. `runRestoreStream` only learns a
+  destination is gone from a write that the buffer would not accept, so a command that reads
+  part of a chunk and exits while what is left of that chunk still fits in the buffer is
+  indistinguishable, from telstore's side, from a command that read every byte. Measured
+  2026-09-10, `head -c 10 >/dev/null; sleep 2` inside `sh -c '…'` as the child (the `sleep` is
+  what keeps the shell alive long enough for the pipe to matter, rather than exiting the instant
+  `head` does and killing the write from the other end):
+
+  | payload | reported |
+  | --- | --- |
+  | 19.8 KB | **success** — the whole remainder after `head`'s ten bytes fit in the pipe buffer, `write()` took it without complaint, and telstore reported a restore of a file `sh` never finished reading |
+  | 391 KB | fails correctly — the remainder no longer fits, the buffer stays full because nothing is draining it, `write()` blocks and then the destination reports itself gone |
+
+  Nothing in `src/stream.js` or `src/commands/restore-stream.js` can close this: the failure
+  this project exists to refuse is a *silent* wrong answer, and there is no signal left to read
+  once the bytes are in the kernel's buffer and the reader has gone — refusing every restore
+  behind a command that might stop early would refuse the canonical consumer too, which the
+  entry above measures reading past its own archive's end for exactly the opposite reason. What
+  the boundary means in practice: a `--out` pipeline is proven end-to-end only against a command
+  that reads everything it is given, the same condition the design has always rested the
+  guarantee on, and a command that deliberately reads a known prefix and stops — `head`, `dd
+  count=`, anything sizing its own read — sits on the unproven side of it whenever that prefix
+  plus whatever the OS pipe buffer holds is smaller than what is left of the backup.
+
 - **A known limit, named because it was seen and not closed: telstore never checks that
   Telegram actually deleted anything.** `deleteMessages` in `src/client.js` throws away what
   `client.deleteMessages` hands back and counts `deleted += batch.length` for every batch the

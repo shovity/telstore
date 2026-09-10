@@ -166,8 +166,9 @@ function tempChunkLines(temp, configDir, error) {
   if (error !== null) {
     return [
       '',
-      `${tempDirFor(configDir)} could not be read: ${error}. A backup made from a command`,
-      'buffers a chunk there, so there may be one holding up to a whole chunk of disk.',
+      `${tempDirFor(configDir)} could not be read: ${error}. A backup made from a command,`,
+      'or a restore into one, buffers a chunk there, so it may be holding up to a whole chunk',
+      'of disk.',
     ]
   }
 
@@ -193,10 +194,11 @@ function tempChunkLines(temp, configDir, error) {
   }
 
   lines.push('')
-  lines.push('A backup made from a command buffers one chunk here while it sends it and removes')
-  lines.push('it afterwards, so these are either runs happening right now or runs that were')
-  lines.push('killed before they could clean up. telstore does not remove them on its own — from')
-  lines.push('outside the run that owns one it cannot tell those two apart. Remove one with:')
+  lines.push('A backup made from a command, or a restore into one, buffers one chunk here while')
+  lines.push('it sends or receives it and removes it afterwards, so these are either runs')
+  lines.push('happening right now or runs that were killed before they could clean up. telstore')
+  lines.push('does not remove them on its own — from outside the run that owns one it cannot')
+  lines.push('tell those two apart. Remove one with:')
   lines.push(`  rm ${shellArg(temp[0].file)}`)
 
   return lines

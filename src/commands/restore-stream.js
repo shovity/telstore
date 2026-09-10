@@ -194,7 +194,19 @@ export async function runRestoreStream(backupId, childArgv, options = {}, deps =
         try {
           progress.setLabel(`Chunk ${chunk.i + 1}/${manifest.chunks.length}`)
 
-          const message = await Promise.race([getMessage(client, chat, chunk.msgId), gone])
+          // getMessage and downloadChunk go over the network, and either can reject on its own
+          // — a stall timeout, a FLOOD_WAIT that outlived its retries, any teleproto error —
+          // which is a different ending from `gone` losing the race: `gone` only ever fires
+          // once the child has already exited, and its own throw already says so. A rejection
+          // from the network call itself used to propagate raw, saying nothing about the
+          // prefix already handed to the command — the same omission `networkFailed` closes for
+          // both calls, through the one `received()` wording rather than a fifth variant of it.
+          const message = await Promise.race([
+            getMessage(client, chat, chunk.msgId).catch((err) => {
+              throw networkFailed(err, childArgv, written)
+            }),
+            gone,
+          ])
 
           if (!message) {
             throw new Error(
@@ -208,6 +220,8 @@ export async function runRestoreStream(backupId, childArgv, options = {}, deps =
             downloadChunk(client, message, handle, 0, progress.advance, {
               retryOptions: { ...retryOptions, onRetry },
               concurrency: settings.downloadConcurrency,
+            }).catch((err) => {
+              throw networkFailed(err, childArgv, written)
             }),
             gone,
           ])
@@ -237,7 +251,13 @@ export async function runRestoreStream(backupId, childArgv, options = {}, deps =
           // exit while the write has a read to finish and a latch to notice. What is left for
           // this catch is the ending where no exit status is coming at all — a command that
           // closes its end of the pipe and goes on working, `head -c 10` inside a shell that
-          // has more to do — where the write is the only thing that will ever report anything.
+          // has more to do — and even there the write is only a mechanism that *can* report it,
+          // not one that always does: once `head` has read its ten bytes and stopped, a
+          // remainder small enough to sit entirely in the OS pipe buffer is accepted by
+          // `write()` without complaint — the kernel took it, nobody will ever read it, and this
+          // catch never fires. Measured 2026-09-10: a 19.8KB remainder behind that same `head -c
+          // 10` reports a restore that never happened; a 391KB one is refused correctly.
+          // `docs/design/data-integrity.md` has both numbers and what binds the guarantee.
           //
           // Which failure this was is asked of writeChunkTo, which says so by type:
           // DestinationGoneError is the far end and nothing else is. Asking the pipe instead —
@@ -336,6 +356,16 @@ function received(childArgv, written) {
     ? `${childArgv[0]} was given nothing.`
     : `${childArgv[0]} had already been given ${formatBytes(written)}, which was correct but ` +
       'is not the whole backup — whatever it did with that is incomplete.'
+}
+
+// getMessage or downloadChunk rejecting is the same class of failure as the two chunk-mismatch
+// branches above — the run stops mid-loop, not at a boundary the command already knows about —
+// so it gets the same treatment rather than propagating whatever teleproto's error happened to
+// say. `err.message` alone was measured reading "FAIL TIMEOUT: no response from Telegram after
+// 3 attempts" while the command had already been handed a correct 195KB prefix and written it
+// to disk; not one word about that in the raw error.
+function networkFailed(err, childArgv, written) {
+  return new Error(`${err.message}. ${received(childArgv, written)}`)
 }
 
 // A pipe that failed, which is the one ending the command's own exit code cannot speak for, and

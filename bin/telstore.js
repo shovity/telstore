@@ -355,6 +355,11 @@ async function main() {
             killChild = kill
           },
         })
+
+        // Mirrors the stream-upload branch above: the run has finished, so a Ctrl-C landing in
+        // the output-flush window that follows must not print the "removing what it already
+        // sent" sentence about a restore that already has everything it is going to get.
+        settled = true
         return
       }
 

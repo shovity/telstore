@@ -292,6 +292,7 @@ on any other implementation:
 | Probe | Result |
 | --- | --- |
 | `tar czvf - ./a` | Listing on stderr, archive on stdout, first bytes `1f8b` — stdout is clean |
+| `tar xzvf -` | Listing on **stdout**, not stderr — the opposite of `czvf`, because stdout is free once the archive is arriving on stdin instead of leaving on it. Measured 2026-09-10 on the same tar: `--verbose` on the restore direction mixes into telstore's own stdout, not into the progress bar on stderr — see `docs/design/terminal-prompts.md` |
 | `tar cf ./a` | exit 2, "Cowardly refusing to create an empty archive" |
 | `tar czf - ./a \| tar xzf - -C ./out` | exit 0, tree extracted under `./out` — `-C` after `-f -` is accepted |
 | `tar czf - ./missing` | exit 2, "Cannot stat" |

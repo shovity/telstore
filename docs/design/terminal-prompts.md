@@ -86,16 +86,28 @@ checked before any of the messages, because said about a run that has finished t
 false at once.
 
 **tar's own file listing is allowed into a child's argv only through a mode that is already
-noisy by request.** `--verbose` on `tarc`/`tarx` turns `czf`/`xzf` into `czvf`/`xzvf`, and `v`
-writes one line per file to stderr — the same stream `createProgress` owns with `\r`, and that
-teleproto's own connection log already shares whenever `--verbose` is set. Making that the
-default instead of gating it behind `--verbose` would mean a restore of a thousand-file tree
-tearing through the progress bar on every ordinary run; gating it behind a flag that already
-means "show more than usual" costs nothing extra, because whoever turns it on has already
-accepted a stderr two other things are writing to. The child's stderr stays inherited either
-way, never captured — `docs/design/module-boundaries.md` has why — so `--verbose` only ever
-decides whether `tar` is one more thing writing to that stream, never whether telstore reads
-what it says.
+noisy by request, and where that listing lands is not the same in both directions.** `--verbose`
+on `tarc`/`tarx` turns `czf`/`xzf` into `czvf`/`xzvf`, and `v` writes one line per file — but
+which stream it writes to depends on which end of the pipe carries the archive. Measured on GNU
+tar 1.35, 2026-09-10, and it splits:
+
+| command | what `tarc`/`tarx` run | where the listing goes |
+| --- | --- | --- |
+| `tarc` | `tar czvf - ./x` | **stderr** — stdout is the archive, so `v` has nowhere else to write |
+| `tarx` | `tar xzvf -` | **stdout** — stdout is free, since the archive is arriving on stdin instead of leaving on it |
+
+For `tarc` the listing lands on stderr, the same stream `createProgress` owns with `\r` and that
+teleproto's own connection log already shares whenever `--verbose` is set — gating it behind a
+flag that already means "show more than usual" costs nothing extra there, because whoever turns
+it on has already accepted a stderr two other things are writing to. For `tarx` the listing does
+not touch the progress bar at all: it lands on telstore's own **stdout**, the stream the
+`Backup`/`Name`/`Into` header and the closing `Done.` line live on, and a thousand-file restore
+with `--verbose` would tear through that narrative rather than through the bar. So gating `v`
+behind `--verbose` is the right call in both directions, and for two different reasons that only
+look like one: "keep the progress bar clean" for `tarc`, "keep telstore's own stdout clean" for
+`tarx`. The child's stderr and stdout both stay inherited either way, never captured —
+`docs/design/module-boundaries.md` has why — so `--verbose` only ever decides whether `tar` is
+one more thing writing to whichever stream it uses, never whether telstore reads what it says.
 
 **Ctrl-C on a streaming restore is the immediate exit every other command used to be, and it is
 deliberately the opposite of the stream upload direction above.** A stream upload has chunks

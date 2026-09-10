@@ -91,7 +91,9 @@ is "npx telstore a.tar.gz -- tar czf - ./dir", and tarx is the same for "restore
 tar xzf -". telstore prints the long form as it runs, so the shortcut teaches what it is
 short for. tarc always compresses, so it makes the name say so: a.tar becomes a.tar.gz,
 and a name with no tar in it at all gets .tar.gz. --verbose adds tar's own file listing
-to both. For tarx, --out is the directory it extracts into. Anything beyond archiving
+to both. For tarx, --out is the directory it extracts into, and tar's own semantics apply
+there: it overwrites files already in it without asking, unlike restore's one-file [y/N]
+prompt — --out is how you aim it somewhere empty instead. Anything beyond archiving
 the paths — -C, --exclude, a pipeline, another compressor — is what -- is still for.
 
 down is logout taken all the way: it removes ~/.telstore entirely — the session, the api_id
