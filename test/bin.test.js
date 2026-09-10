@@ -12,9 +12,11 @@ import { LOGGED_IN, tempDir } from './helpers.js'
 const run = promisify(execFile)
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'bin', 'telstore.js')
 
-async function runCli(args) {
+async function runCli(args, { home } = {}) {
   try {
-    const { stdout, stderr } = await run(process.execPath, [BIN, ...args])
+    const { stdout, stderr } = await run(process.execPath, [BIN, ...args], {
+      env: home ? { ...process.env, HOME: home } : process.env,
+    })
     return { code: 0, stdout, stderr }
   } catch (err) {
     return { code: err.code, stdout: err.stdout ?? '', stderr: err.stderr ?? '' }
@@ -47,29 +49,26 @@ test('restore without a backup id gives an example, not a stack trace', async ()
   assert.doesNotMatch(stderr, /at .*\.js:\d+/)
 })
 
-// The parser keeps `restore <id> -- <cmd>` whole because it is the spec's stage 2, and for a
-// while nothing downstream read it: the run wrote the file to disk and never mentioned the
-// command it had been handed. Someone typing this is asking for their data on that command's
-// stdin, so a file quietly appearing instead is a different thing done confidently — refusing
-// is the only answer that does not need to be discovered afterwards.
-test('restoring into a command is refused, not quietly turned into a file', async () => {
-  const { code, stdout, stderr } = await runCli(['restore', 'telstore-1', '--', 'tar', 'x'])
+// It used to be refused outright. What tells you it is not any more is where it fails now:
+// the login, which is the first thing a restore of any shape needs.
+test('restoring into a command reaches the command, not a refusal', async () => {
+  const home = await tempDir()
+  const { code, stderr } = await runCli(['restore', 'telstore-1', '--', 'tar', 'xf', '-'], { home })
 
   assert.equal(code, 1)
-  assert.match(stderr, /not built yet/)
-  // The way to do it today, with both halves of it: the restore that works and the command
-  // it was going to be piped into.
-  assert.match(stderr, /npx telstore restore telstore-1/)
-  assert.match(stderr, /tar x/)
+  assert.match(stderr, /Not logged in/)
+  assert.doesNotMatch(stderr, /not built yet/)
   assert.doesNotMatch(stderr, /at .*\.js:\d+/)
-  assert.equal(stdout, '')
 })
 
-// A refusal the help does not contradict: the usage lines offer what the binary will do.
-test('the help does not offer a restore into a command', async () => {
-  const { stdout } = await runCli(['--help'])
+test('tarc without paths, and tarx with two ids, are turned away with the help', async () => {
+  const missing = await runCli(['tarc', 'a.tar.gz'])
+  assert.equal(missing.code, 2)
+  assert.match(missing.stderr, /Nothing to archive/)
 
-  assert.doesNotMatch(stdout, /restore <id> --/)
+  const two = await runCli(['tarx', 'id-1', 'id-2'])
+  assert.equal(two.code, 2)
+  assert.match(two.stderr, /one backup id/)
 })
 
 test('uploading a nonexistent file gives a short error, not a stack trace', async () => {

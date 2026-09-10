@@ -177,6 +177,17 @@ export function interruptMessage(
     )
   }
 
+  // The restore direction of the same idea, and the difference is the whole message: a stream
+  // upload has to unwind what it put in the chat, while this one put nothing there. What it
+  // cannot put back is what the command already did with the bytes it was given.
+  if (command === 'restore' && stream) {
+    return (
+      '\nStopped. Nothing in the chat changed and nothing was kept on this machine, but the ' +
+      'command had already been given part of the backup, so whatever it wrote from that is ' +
+      'incomplete. A restore into a command cannot be resumed — run it again from the start.\n'
+    )
+  }
+
   if (command === 'upload') {
     const backup = backupId ? `Backup ${backupId} is saved` : 'Progress is saved'
 

@@ -66,6 +66,7 @@ function fakeChild({
   keepRunning = false,
   failOnEof = false,
   closeAfter = null,
+  quietCloseAfter = null,
 } = {}) {
   const stdin = new PassThrough()
   const seen = []
@@ -87,6 +88,13 @@ function fakeChild({
       setImmediate(() =>
         stdin.destroy(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })),
       )
+    }
+
+    // The quiet version of the same timing: destroyed with no error at all, which is what a
+    // command's own close(0) looks like from this side when nothing has tried to write since —
+    // no 'error' event is ever going to arrive to latch `pipeFailure`, only the flags change.
+    if (quietCloseAfter !== null && Buffer.concat(seen).length >= quietCloseAfter) {
+      setImmediate(() => stdin.destroy())
     }
   })
 
@@ -369,6 +377,37 @@ test('a command that closes its stdin between chunks fails at once, not on a dea
   )
   // And the chunk after it was never fetched: the run has known the pipe was gone since the
   // moment it was latched, and downloading another 1800MB to push into it is work nobody reads.
+  assert.deepEqual(downloaded, [backup.manifest.chunks[0].msgId])
+})
+
+// The timing no other fixture here reaches: a quiet destroy, with no 'error' event behind it at
+// all. `pipeFailure` stays null forever, so only checking the flags directly — what the guard
+// was widened to do — catches this before the next chunk is downloaded for nothing. It also has
+// to say something different from the error case: every byte written so far truly arrived, so
+// the sentence is the one `stoppedReading` already uses, not the one that claims bytes were lost.
+test('a command that closes its stdin quietly between chunks is caught before the next download, with the true sentence', async () => {
+  const backup = fakeBackup()
+  const ws = await workspace()
+  const child = fakeChild({ quietCloseAfter: 4, keepRunning: true })
+  const { deps, downloaded } = fakeChat(backup, child, ws)
+
+  // As above: `gone` never settles for a command that does not exit, so nothing but the
+  // widened guard could possibly catch this.
+  const outcome = await Promise.race([
+    runRestoreStream(backup.id, ARGV, {}, deps).then(
+      () => 'restored',
+      (err) => err.message,
+    ),
+    new Promise((resolve) => setTimeout(resolve, 1000, 'HUNG')),
+  ])
+
+  assert.match(outcome, /tar stopped reading with 4 B of 6 B written into it, so it did not receive the backup/)
+  // The wrong sentence, and the one this fix replaces: everything written so far was taken
+  // cleanly, so nothing "never arrived".
+  assert.doesNotMatch(outcome, /never arrived/)
+
+  // The chunk after it was never fetched, exactly as the noisy close above never fetches one
+  // either — the point of widening the guard rather than only rewording what it already caught.
   assert.deepEqual(downloaded, [backup.manifest.chunks[0].msgId])
 })
 

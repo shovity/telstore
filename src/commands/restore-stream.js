@@ -166,7 +166,22 @@ export async function runRestoreStream(backupId, childArgv, options = {}, deps =
         // also the only thing that ends a run whose command closed its stdin at a chunk boundary
         // and did not exit — `gone` never settles for a command that is still running, and
         // nothing here puts a deadline on waiting for one.
-        if (pipeFailure !== null) throw pipeFailed(childArgv, written, pipeFailure)
+        //
+        // `pipeFailure` alone is not enough here: it is latched from an 'error' event, and a
+        // command that closes its end of the pipe quietly between two chunks — without ever
+        // writing into it again to provoke one — leaves `pipeFailure` null. `writeChunkTo`'s own
+        // probe would still catch that, but only once it is pumping — after this chunk has
+        // already been downloaded for nothing. Checking the flags directly is what the probe
+        // itself checks, asked a chunk earlier.
+        if (pipeFailure !== null || child.stdin.destroyed || child.stdin.writableEnded) {
+          // A real 'error' means some of what telstore already wrote may never have arrived.
+          // A destroyed-or-ended pipe with no error behind it means the opposite: everything
+          // written so far was taken cleanly, and the command simply stopped reading before the
+          // backup ended — the same ending `stoppedReading` already says correctly.
+          throw pipeFailure !== null
+            ? pipeFailed(childArgv, written, pipeFailure)
+            : stoppedReading(childArgv, written, manifest.size)
+        }
 
         const file = path.join(tmp, `${backupId}-${chunk.i}.chunk`)
 

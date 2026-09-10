@@ -294,6 +294,15 @@ test('Ctrl-C during a batch restore names what is already finished', () => {
   assert.match(message, /only the ids that are left/)
 })
 
+test('Ctrl-C on a restore into a command says what cannot be taken back', () => {
+  const message = interruptMessage('restore', { stream: true, backupId: 'telstore-1' })
+
+  assert.match(message, /Nothing in the chat changed/)
+  assert.match(message, /incomplete/)
+  // The file restore's wording promises a resume. This one must not borrow it.
+  assert.doesNotMatch(message, /carry on/)
+})
+
 test('interrupting anything else just says it stopped', () => {
   assert.equal(interruptMessage('login'), '\nStopped.\n')
   assert.equal(interruptMessage(null), '\nStopped.\n')
