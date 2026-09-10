@@ -25,7 +25,32 @@ const LONG_WAIT_MS = 60_000
 // by then the trouble has outlived two backoffs and is worth saying out loud.
 const ANNOUNCE_AFTER_ATTEMPT = 3
 
-async function realGetMessage(client, peer, msgId) {
+// Lifted out of runRestore so the streaming restore uses this one rather than a second copy
+// that drifts. A retry nobody is told about is indistinguishable from a hung transfer, because
+// the progress bar simply stops moving while the wait runs.
+export function createOnRetry(warn) {
+  return function onRetry(err, attempt, delayMs, elapsedMs = 0) {
+    if (delayMs > LONG_WAIT_MS) {
+      warn(
+        `\nTelegram wants ${formatDuration(delayMs / 1000)} of waiting before the next part ` +
+          `(${err.message}). telstore is waiting and will carry on by itself, leave it running.\n`,
+      )
+      return
+    }
+
+    // The exception to staying quiet: an attempt that took a minute to fail spent that
+    // minute with the bar frozen, which is exactly what a hang looks like. Those are worth
+    // a line the first time, whatever the attempt number.
+    if (attempt < ANNOUNCE_AFTER_ATTEMPT && elapsedMs < LONG_WAIT_MS) return
+
+    warn(
+      `\nTemporary error (${err.message}), retry ${attempt} in ` +
+        `${formatDuration(delayMs / 1000)}.\n`,
+    )
+  }
+}
+
+export async function realGetMessage(client, peer, msgId) {
   const [message] = await client.getMessages(peer, { ids: [msgId] })
   return message ?? null
 }
@@ -100,25 +125,7 @@ export async function runRestore(backupId, options = {}, deps = {}) {
   // A restore keeps no progress file, so a part that comes back -503 is retried rather than
   // thrown away — and a retry nobody is told about is indistinguishable from a hung transfer,
   // because the progress bar simply stops moving while the wait runs.
-  function onRetry(err, attempt, delayMs, elapsedMs = 0) {
-    if (delayMs > LONG_WAIT_MS) {
-      warn(
-        `\nTelegram wants ${formatDuration(delayMs / 1000)} of waiting before the next part ` +
-          `(${err.message}). telstore is waiting and will carry on by itself, leave it running.\n`,
-      )
-      return
-    }
-
-    // The exception to staying quiet: an attempt that took a minute to fail spent that
-    // minute with the bar frozen, which is exactly what a hang looks like. Those are worth
-    // a line the first time, whatever the attempt number.
-    if (attempt < ANNOUNCE_AFTER_ATTEMPT && elapsedMs < LONG_WAIT_MS) return
-
-    warn(
-      `\nTemporary error (${err.message}), retry ${attempt} in ` +
-        `${formatDuration(delayMs / 1000)}.\n`,
-    )
-  }
+  const onRetry = createOnRetry(warn)
 
   const client = await connect(config, { verbose: settings.verbose })
 
