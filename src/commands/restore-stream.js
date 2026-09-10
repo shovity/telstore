@@ -145,7 +145,8 @@ export async function runRestoreStream(backupId, childArgv, options = {}, deps =
     // handlers on this stream for the life of the run — and absorbing it on purpose is not
     // enough either: a pipe that failed means the command did not get what was written into it,
     // which is the difference between a restore and a plausible-looking one. So it is latched,
-    // and read once the child's exit is in hand.
+    // and read in two places: before every chunk after the first, and once the child's exit is
+    // in hand.
     let pipeFailure = null
     child.stdin.on('error', (err) => {
       pipeFailure ??= err
@@ -159,6 +160,14 @@ export async function runRestoreStream(backupId, childArgv, options = {}, deps =
 
     try {
       for (const chunk of manifest.chunks) {
+        // Asked before the next chunk rather than only at the end, because by then the run has
+        // known for a whole download: a pipe that has gone will not take this chunk either, and
+        // fetching 1800MB to push into it is eight minutes spent on bytes nobody will read. It is
+        // also the only thing that ends a run whose command closed its stdin at a chunk boundary
+        // and did not exit — `gone` never settles for a command that is still running, and
+        // nothing here puts a deadline on waiting for one.
+        if (pipeFailure !== null) throw pipeFailed(childArgv, written, pipeFailure)
+
         const file = path.join(tmp, `${backupId}-${chunk.i}.chunk`)
 
         // Said before the open, for the reason the upload direction says it before its own:
@@ -269,12 +278,7 @@ export async function runRestoreStream(backupId, childArgv, options = {}, deps =
     // not checking is a backup reported as restored that the command never finished receiving,
     // and this project pays the first to avoid the second.
     if (pipeFailure !== null) {
-      throw new Error(
-        `${childArgv[0]} exited ${signal !== null ? `on ${signal}` : String(code)}, but its ` +
-          `stdin failed first (${pipeFailure.message}) — so some of the ` +
-          `${formatBytes(written)} telstore wrote into it never arrived. Not reporting a ` +
-          'restore on that. Nothing in the chat changed.',
-      )
+      throw pipeFailed(childArgv, written, pipeFailure, { code, signal })
     }
 
     if (code !== 0 || signal !== null) {
@@ -316,6 +320,22 @@ function received(childArgv, written) {
     ? `${childArgv[0]} was given nothing.`
     : `${childArgv[0]} had already been given ${formatBytes(written)}, which was correct but ` +
       'is not the whole backup — whatever it did with that is incomplete.'
+}
+
+// A pipe that failed, which is the one ending the command's own exit code cannot speak for, and
+// one sentence for both the places that report it: the chunk boundary, where there is no exit
+// status yet and may never be one, and after the child has exited.
+function pipeFailed(childArgv, written, err, exit = null) {
+  const what =
+    exit === null
+      ? `${childArgv[0]}'s stdin failed`
+      : `${childArgv[0]} exited ${exit.signal !== null ? `on ${exit.signal}` : String(exit.code)}` +
+        ', but its stdin failed first'
+
+  return new Error(
+    `${what} (${err.message}) — so some of the ${formatBytes(written)} telstore wrote into it ` +
+      'never arrived. Not reporting a restore on that. Nothing in the chat changed.',
+  )
 }
 
 // A command that is gone while there are bytes left. Exit 0 is included on purpose: `head -c

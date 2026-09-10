@@ -65,6 +65,7 @@ function fakeChild({
   stopAfter = null,
   keepRunning = false,
   failOnEof = false,
+  closeAfter = null,
 } = {}) {
   const stdin = new PassThrough()
   const seen = []
@@ -77,6 +78,15 @@ function fakeChild({
     // which is what the real pipe does when the far end is gone.
     if (stopAfter !== null && Buffer.concat(seen).length >= stopAfter) {
       stdin.destroy(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }))
+    }
+
+    // The other timing, and the one every fixture here used to miss: a command that takes a
+    // whole chunk and closes its end between chunks rather than inside one, so telstore is not
+    // in a write when the pipe goes. A turn later, because inside the write is the case above.
+    if (closeAfter !== null && Buffer.concat(seen).length >= closeAfter) {
+      setImmediate(() =>
+        stdin.destroy(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })),
+      )
     }
   })
 
@@ -335,6 +345,31 @@ test('a pipe that failed is not reported as a restore, even with the command exi
     () => runRestoreStream(backup.id, ARGV, {}, deps),
     /stdin failed first \(write EPIPE\) — so some of the 6 B telstore wrote into it never arrived/,
   )
+})
+
+test('a command that closes its stdin between chunks fails at once, not on a deadline', async () => {
+  const backup = fakeBackup()
+  const ws = await workspace()
+  const child = fakeChild({ closeAfter: 4, keepRunning: true })
+  const { deps, downloaded } = fakeChat(backup, child, ws)
+
+  // Nothing else would rescue this one: `gone` never settles for a command that does not exit,
+  // and `await child.exited` has no deadline — so a run that waits for the pipe waits forever.
+  const outcome = await Promise.race([
+    runRestoreStream(backup.id, ARGV, {}, deps).then(
+      () => 'restored',
+      (err) => err.message,
+    ),
+    new Promise((resolve) => setTimeout(resolve, 1000, 'HUNG')),
+  ])
+
+  assert.match(
+    outcome,
+    /stdin failed \(write EPIPE\) — so some of the 4 B telstore wrote into it never arrived/,
+  )
+  // And the chunk after it was never fetched: the run has known the pipe was gone since the
+  // moment it was latched, and downloading another 1800MB to push into it is work nobody reads.
+  assert.deepEqual(downloaded, [backup.manifest.chunks[0].msgId])
 })
 
 test('a command that exits non-zero after reading everything fails', async () => {
