@@ -64,6 +64,7 @@ function fakeChild({
   failToStart = null,
   stopAfter = null,
   keepRunning = false,
+  failOnEof = false,
 } = {}) {
   const stdin = new PassThrough()
   const seen = []
@@ -78,6 +79,21 @@ function fakeChild({
       stdin.destroy(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }))
     }
   })
+
+  // A command whose far end is already gone when EOF is signalled. `end()` is where a real pipe
+  // reports that, and the error it emits arrives with no write in flight to notice it — so this
+  // is the shape that used to take the process down with an unhandled 'error' event.
+  if (failOnEof) {
+    const realEnd = stdin.end.bind(stdin)
+
+    stdin.end = (...args) => {
+      process.nextTick(() =>
+        stdin.destroy(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' })),
+      )
+
+      return realEnd(...args)
+    }
+  }
 
   const exited = failToStart
     ? Promise.reject(new Error(failToStart))
@@ -183,13 +199,20 @@ test('every byte the manifest names reaches the command, in order', async () => 
   const backup = fakeBackup()
   const ws = await workspace()
   const child = fakeChild()
-  const { deps } = fakeChat(backup, child, ws)
+  const { deps, spawn } = fakeChat(backup, child, ws)
 
   const result = await runRestoreStream(backup.id, ARGV, {}, deps)
 
   assert.deepEqual(child.bytes(), backup.content)
   assert.deepEqual(result, { id: backup.id, size: 6, chunks: 2 })
   assert.equal(child.wasKilled(), false)
+
+  // stdin is telstore's to write and the command's own output stays the command's. A child whose
+  // stdout were piped here would fill a pipe nothing reads and deadlock on it — `tar xzvf -`
+  // writes to stdout for a living.
+  assert.deepEqual(spawn.calls, [
+    { childArgv: ARGV, options: { stdio: ['pipe', 'inherit', 'inherit'] } },
+  ])
 })
 
 test('nothing is downloaded if the command cannot start', async () => {
@@ -198,6 +221,10 @@ test('nothing is downloaded if the command cannot start', async () => {
   const child = fakeChild({ failToStart: 'Cannot run tar: no such command on this machine.' })
   const { deps, downloaded } = fakeChat(backup, child, ws)
 
+  // The matched string is the fake's own: naming the command that could not be run belongs to
+  // spawnProducer and is tested there. What this proves is that the rejection gets out of the run
+  // at all rather than being swallowed by the race it is in, and that it gets out before anything
+  // has been downloaded.
   await assert.rejects(() => runRestoreStream(backup.id, ARGV, {}, deps), /Cannot run tar/)
 
   assert.deepEqual(downloaded, [])
@@ -263,9 +290,13 @@ test('a command that stops reading early fails, even though it exited 0', async 
 
   // The run does not report a restore: a restore reported for a command that saw four bytes
   // of six is the silent wrong answer this project exists not to give.
+  //
+  // Either wording will do, because which of the two failures is noticed first is a race between
+  // the pipe and the exit status and nothing about the guarantee rests on it: both name what was
+  // written and what was owed, and neither reports a restore.
   await assert.rejects(
     () => runRestoreStream(backup.id, ARGV, {}, deps),
-    /tar exited 0 after reading 4 B of 6 B, so it did not receive the backup/,
+    /tar (exited 0|stopped reading) with 4 B of 6 B written into it, so it did not receive the backup/,
   )
 })
 
@@ -280,7 +311,7 @@ test('a command that closes its stdin and keeps running fails by the same words'
 
   await assert.rejects(
     () => runRestoreStream(backup.id, ARGV, {}, deps),
-    /tar stopped reading after .+ of 293\.0 KB, so it did not receive the backup/,
+    /tar stopped reading with .+ of 293\.0 KB written into it, so it did not receive the backup/,
   )
 
   assert.ok(
@@ -289,6 +320,21 @@ test('a command that closes its stdin and keeps running fails by the same words'
   )
   // And it is not left running behind a pipe nothing will write to again.
   assert.equal(child.wasKilled(), true)
+})
+
+test('a pipe that failed is not reported as a restore, even with the command exiting 0', async () => {
+  const backup = fakeBackup()
+  const ws = await workspace()
+  const child = fakeChild({ exitCode: 0, failOnEof: true })
+  const { deps } = fakeChat(backup, child, ws)
+
+  // Two things at once, and the first is why the second can be asserted at all: an 'error' on
+  // the child's stdin with nothing listening is an uncaught exception, so a run without the latch
+  // takes this whole test process down rather than failing this assertion.
+  await assert.rejects(
+    () => runRestoreStream(backup.id, ARGV, {}, deps),
+    /stdin failed first \(write EPIPE\) — so some of the 6 B telstore wrote into it never arrived/,
+  )
 })
 
 test('a command that exits non-zero after reading everything fails', async () => {
