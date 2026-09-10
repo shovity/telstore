@@ -52,6 +52,9 @@ Usage:
   npx telstore login                      Log in to Telegram, only needed once
   npx telstore <file|folder|pattern>...   Split files and upload them to Telegram
   npx telstore <name> -- <command>...     Store what a command writes, under <name>
+  npx telstore tarc <name> <path>...      Archive paths with tar and store the archive
+  npx telstore tarx <backup-id>           Restore a backup and extract it with tar
+  npx telstore restore <id> -- <cmd>...   Restore onto a command instead of a file
   npx telstore list                       List the backups stored in the destination
   npx telstore list --search <text>       List only the backups that text appears in
   npx telstore restore <backup-id>...     Download the chunks and reassemble the files
@@ -73,7 +76,7 @@ one file is listed and confirmed before the first byte goes out. Run telstore ag
 the files that are left to carry on after an interruption.
 
 A name followed by -- makes the backup out of what a command writes, so nothing has to be on
-disk first: npx telstore a.tar -- tar cf ./a. The manifest goes out only if that command's
+disk first: npx telstore a.tar -- tar cf - ./a. The manifest goes out only if that command's
 output ended and the command exited 0 — an end after a crash looks exactly like an end after
 success, and running the command is how telstore tells them apart. A backup made this way
 cannot be resumed, so a run that fails, and a Ctrl-C, remove the chunks already sent rather
@@ -82,6 +85,14 @@ goes in as -- bash -c 'set -o pipefail; ...', which is also where compression or
 belongs. The pipefail is not decoration — a shell reports the last command's exit status, so
 without it a producer that dies halfway through a pipeline still exits 0 and the manifest goes
 out for a truncated backup.
+
+tarc and tarx are the common case written out once: "npx telstore tarc a.tar.gz ./dir"
+is "npx telstore a.tar.gz -- tar czf - ./dir", and tarx is the same for "restore <id> --
+tar xzf -". telstore prints the long form as it runs, so the shortcut teaches what it is
+short for. tarc always compresses, so it makes the name say so: a.tar becomes a.tar.gz,
+and a name with no tar in it at all gets .tar.gz. --verbose adds tar's own file listing
+to both. For tarx, --out is the directory it extracts into. Anything beyond archiving
+the paths — -C, --exclude, a pipeline, another compressor — is what -- is still for.
 
 down is logout taken all the way: it removes ~/.telstore entirely — the session, the api_id
 and api_hash, every setting and every resume record — and asks once before it does. It opens
@@ -329,8 +340,9 @@ function filesNamedAfterNote(tokens) {
 
 // tarc is the long form with the three decisions that never change already made: `c` for
 // create, `z` for gzip, `f -` for "write it to stdout, which is where telstore is listening".
-// The missing `-` is not a hypothetical mistake — it was in this project's own help text and
-// README, where `tar cf ./a` exits 2 with "Cowardly refusing to create an empty archive".
+// The missing `-` is not a hypothetical mistake — this project's own help text and README
+// shipped exactly that omission once, and paid for it with an example that exited 2 instead
+// of writing a backup.
 //
 // An expansion rather than a command of its own: `runStreamUpload` is reached with exactly the
 // argv the `--` form reaches it with, so there is no second upload path, no second rollback
@@ -409,7 +421,7 @@ export function route(argv) {
   const filesAfterNote = filesNamedAfterNote(tokens)
 
   // --help (or -h, or the `help` subcommand) always wins, terminator or not: someone typing
-  // `telstore --help -- tar cf ./a` is asking what telstore does, not making a mistake for
+  // `telstore --help -- tar cf - ./a` is asking what telstore does, not making a mistake for
   // one of the checks below to catch.
   if (values.help || first === 'help') {
     return { command: 'help', args: [], options: values, filesAfterNote, childArgv, shortcut: null }
@@ -418,7 +430,7 @@ export function route(argv) {
   if (childArgv !== null && childArgv.length === 0) {
     throw new Error(
       'Missing the command after --: telstore has nothing to run and store. ' +
-        'Example: npx telstore a.tar -- tar cf ./a',
+        'Example: npx telstore a.tar -- tar cf - ./a',
     )
   }
 
@@ -443,7 +455,7 @@ export function route(argv) {
       // beside the alternative it is offering, not in an argument parser.
       if (first !== 'restore') {
         throw new Error(
-          `${first} takes no command after --. An upload (npx telstore a.tar -- tar cf ./a) ` +
+          `${first} takes no command after --. An upload (npx telstore a.tar -- tar cf - ./a) ` +
             'and a restore (npx telstore restore <id> -- tar xf -) are the two that run one.',
         )
       }
@@ -467,7 +479,7 @@ export function route(argv) {
     if (positionals.length === 0) {
       throw new Error(
         'Missing a name before --. telstore stores what the command writes under a name you ' +
-          'choose, and there is nothing to take one from. Example: npx telstore a.tar -- tar cf ./a',
+          'choose, and there is nothing to take one from. Example: npx telstore a.tar -- tar cf - ./a',
       )
     }
 

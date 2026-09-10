@@ -241,6 +241,24 @@ test('--help mentions down', async () => {
   assert.match(stdout, /npx telstore down/)
 })
 
+test('--help offers the tar shortcuts and the restore into a command', async () => {
+  const { code, stdout } = await runCli(['--help'])
+
+  assert.equal(code, 0)
+  assert.match(stdout, /telstore tarc/)
+  assert.match(stdout, /telstore tarx/)
+  assert.match(stdout, /restore <id> -- <cmd>/)
+})
+
+// The line the whole plan started from. A help text whose example exits 2 is worse than no
+// example: it is a failure the reader blames on telstore.
+test('no example in the help writes a tar archive to a file called a', async () => {
+  const { stdout } = await runCli(['--help'])
+
+  assert.doesNotMatch(stdout, /tar cf \.\/a/)
+  assert.match(stdout, /tar cf - \.\/a/)
+})
+
 // Every unit test injects a configDir, which is the one thing production never does: there
 // the path comes from os.homedir(). This is the only test that proves down removes the
 // directory the binary actually picks — under a HOME of its own, because the alternative is

@@ -977,7 +977,7 @@ test('the header names the backup, the command and where it is going', async () 
 
   const result = await runStreamUpload(
     'a.tar',
-    ['tar', 'cf', './a'],
+    ['tar', 'cf', '-', './a'],
     { 'chunk-size': '10' },
     streamDeps(fakeClient(), ws, {
       spawn: fakeSpawn([TEN]),
@@ -991,7 +991,7 @@ test('the header names the backup, the command and where it is going', async () 
 
   assert.match(text, new RegExp(`Backup ${result.id}`))
   assert.match(text, /a\.tar/)
-  assert.match(text, /tar cf \.\/a/)
+  assert.match(text, /tar cf - \.\/a/)
   assert.match(text, /@store/)
   assert.match(text, new RegExp(`npx telstore restore ${result.id}`))
 })

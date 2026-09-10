@@ -35,7 +35,7 @@ import { ChunkReader, discardChunkFile } from '../stream.js'
 import { uploadRange } from '../uploader.js'
 import { createOnRetry, realSendChunk, realSendManifest } from './upload.js'
 
-// `telstore a.tar -- tar cf ./a`: the backup's bytes are what the command writes, and the
+// `telstore a.tar -- tar cf - ./a`: the backup's bytes are what the command writes, and the
 // name is a label, not a file telstore reads.
 //
 // This is runUpload with the one thing it leans on taken away — a length known up front — so

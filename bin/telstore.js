@@ -272,7 +272,7 @@ async function main() {
     }
 
     case 'upload': {
-      // `telstore a.tar -- tar cf ./a`: one name, and the bytes are what the command writes
+      // `telstore a.tar -- tar cf - ./a`: one name, and the bytes are what the command writes
       // rather than a file on disk. route has already refused every other shape of that line.
       if (parsed.childArgv) {
         const { runStreamUpload } = await import('../src/commands/upload-stream.js')

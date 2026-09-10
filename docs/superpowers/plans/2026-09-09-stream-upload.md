@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** `npx telstore a.tar -- tar cf ./a` uploads a backup from a command's stdout, sends
+**Goal:** `npx telstore a.tar -- tar cf - ./a` uploads a backup from a command's stdout, sends
 the manifest only if that command exits 0, and deletes everything it sent if anything goes
 wrong.
 
@@ -148,7 +148,7 @@ In `route`, split first and parse only `head`. Then, when `childArgv` is not nul
 if (childArgv !== null && childArgv.length === 0) {
   throw new Error(
     'Nothing to run: -- has to be followed by the command whose output telstore stores. ' +
-      'Example: npx telstore a.tar -- tar cf ./a',
+      'Example: npx telstore a.tar -- tar cf - ./a',
   )
 }
 ```
@@ -160,7 +160,7 @@ if (childArgv) {
   if (positionals.length === 0) {
     throw new Error(
       'Missing a name before --. telstore stores what the command writes under a name you ' +
-        'choose, and there is nothing to take one from. Example: npx telstore a.tar -- tar cf ./a',
+        'choose, and there is nothing to take one from. Example: npx telstore a.tar -- tar cf - ./a',
     )
   }
 
@@ -179,7 +179,7 @@ by name now is what keeps the error honest):
 ```js
 if (childArgv && first !== 'restore') {
   throw new Error(
-    `${first} takes no command after --. Only an upload (npx telstore a.tar -- tar cf ./a) ` +
+    `${first} takes no command after --. Only an upload (npx telstore a.tar -- tar cf - ./a) ` +
       'and a restore (npx telstore restore <id> -- tar x) read one.',
   )
 }

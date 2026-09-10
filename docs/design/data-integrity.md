@@ -42,7 +42,7 @@
   and the stat, and `status` is the command someone runs *because* something is wrong.
 
 - **A stream upload has no re-stat to make, and the child's exit code is what stands in its
-  place.** `telstore a.tar -- tar cf ./a` reads a command's stdout, so there is no file to
+  place.** `telstore a.tar -- tar cf - ./a` reads a command's stdout, so there is no file to
   stat, no length known up front and no `planChunks`. The rule that replaces it is a
   biconditional, and it is the entire reason telstore spawns the command instead of accepting
   `tar c ./dir | telstore`: **the manifest is sent if and only if stdout reached EOF and the
