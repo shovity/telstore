@@ -5,12 +5,15 @@ import { deleteCommand } from './shell.js'
 import { archiveName } from './tar.js'
 
 // The shortcuts dispatch by name, not through SUBCOMMANDS: what they return is not a command
-// called `tarc`, it is an upload (or, once tarx joins, a restore) with the line already
+// called `tarc`, it is an upload (or, for `tarx`, a restore) with the line already
 // rewritten into the form that command understands — there is no `runTarc` for SUBCOMMANDS to
 // route to. They still belong in the set below all the same, because SUBCOMMANDS is the list of
 // words telstore will not read as a file name, and a shortcut claims one exactly as a
-// subcommand does. Task 3 adds `['tarx', tarxLine]` here.
-const SHORTCUTS = new Map([['tarc', tarcLine]])
+// subcommand does.
+const SHORTCUTS = new Map([
+  ['tarc', tarcLine],
+  ['tarx', tarxLine],
+])
 
 const SUBCOMMANDS = new Set([
   'login',
@@ -352,6 +355,35 @@ function tarcLine(rest, values, filesAfterNote) {
   }
 }
 
+// The mirror of tarcLine. `x` for extract, `z` because tarc always compressed, `f -` because
+// the bytes arrive on stdin.
+function tarxLine(rest, values, filesAfterNote) {
+  requireOneBackupId(rest, 'tarx')
+
+  const childArgv = ['tar', values.verbose ? 'xzvf' : 'xzf', '-']
+
+  // Pushed after `-` on purpose, which is the order measured to work on GNU tar 1.35:
+  // `tar xzf - -C ./here`. See the probe table in the spec.
+  if (values.out !== undefined) childArgv.push('-C', values.out)
+
+  return { command: 'restore', args: rest, options: values, filesAfterNote, childArgv, shortcut: 'tarx' }
+}
+
+// One command reads one stream, so a line that names two backups is a line with no answer:
+// extracting two archives into one working directory in sequence is a question nobody asked.
+function requireOneBackupId(ids, what) {
+  if (ids.length === 0) {
+    throw new Error(`Missing backup id. Example: npx telstore ${what} telstore-20260905-7f3a91`)
+  }
+
+  if (ids.length > 1) {
+    throw new Error(
+      `One command reads one stream, so ${what} takes one backup id and got ${ids.length}: ` +
+        `${ids.join(', ')}. Run telstore once per backup.`,
+    )
+  }
+}
+
 export function route(argv) {
   const { head, childArgv } = splitAtTerminator(argv)
 
@@ -386,7 +418,7 @@ export function route(argv) {
     // Reached before the generic "takes no command after --" below, because for these two the
     // reason is different and so is the way out: they are not a subcommand that happens not to
     // run commands, they are a command already.
-    if (first === 'tarc' || first === 'tarx') {
+    if (SHORTCUTS.has(first)) {
       throw new Error(
         `${first} already is the command it runs, so it cannot be followed by another one. ` +
           `Drop the -- to use ${first}, or drop ${first} to write the command out yourself.`,
@@ -400,8 +432,21 @@ export function route(argv) {
       // beside the alternative it is offering, not in an argument parser.
       if (first !== 'restore') {
         throw new Error(
-          `${first} takes no command after --. An upload is what runs one ` +
-            '(npx telstore a.tar -- tar cf ./a); restoring into a command is not built yet.',
+          `${first} takes no command after --. An upload (npx telstore a.tar -- tar cf ./a) ` +
+            'and a restore (npx telstore restore <id> -- tar xf -) are the two that run one.',
+        )
+      }
+
+      requireOneBackupId(rest, 'restore')
+
+      // --out places a file, and this path writes none: the bytes go to the command on its
+      // stdin. Left to pass silently it would read as "restore into the command AND write
+      // the file over there", which is not what happens.
+      if (values.out !== undefined) {
+        throw new Error(
+          'A restore into a command writes no file, so --out has nothing to place: the bytes ' +
+            'go to the command on its stdin. Tell the command where to put them instead ' +
+            '(npx telstore restore <id> -- tar xf - -C ./here).',
         )
       }
 

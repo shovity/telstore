@@ -557,3 +557,47 @@ test('a file literally named tarc still uploads as ./tarc', () => {
   assert.equal(parsed.command, 'upload')
   assert.deepEqual(parsed.args, ['./tarc'])
 })
+
+test('tarx expands into the restore -- line a person could have typed', () => {
+  const short = route(['tarx', 'telstore-20260905-7f3a91'])
+  const long = route(['restore', 'telstore-20260905-7f3a91', '--', 'tar', 'xzf', '-'])
+
+  assert.equal(short.command, 'restore')
+  assert.deepEqual(short.args, long.args)
+  assert.deepEqual(short.childArgv, long.childArgv)
+  assert.equal(short.shortcut, 'tarx')
+})
+
+test('tarx --verbose adds v', () => {
+  assert.deepEqual(route(['tarx', '--verbose', 'id-1']).childArgv, ['tar', 'xzvf', '-'])
+})
+
+// --out means "where the files go", which for tar is -C. On this path telstore writes no file
+// of its own, so there is nothing else for it to mean.
+test('tarx --out becomes tar -C', () => {
+  assert.deepEqual(route(['tarx', '--out', './here', 'id-1']).childArgv,
+    ['tar', 'xzf', '-', '-C', './here'])
+})
+
+test('tarx needs an id, and exactly one', () => {
+  assert.throws(() => route(['tarx']), /Missing backup id/)
+  assert.throws(() => route(['tarx', 'id-1', 'id-2']), /one backup id/)
+})
+
+// One command reads one stream, the mirror of the rule the upload direction already keeps.
+test('a general restore into a command takes one id too', () => {
+  assert.throws(() => route(['restore', '--', 'tar', 'xf', '-']), /Missing backup id/)
+  assert.throws(() => route(['restore', 'a', 'b', '--', 'tar', 'xf', '-']), /one backup id/)
+})
+
+// A flag that silently does nothing is worse than a flag that is refused.
+test('--out is refused for a restore into a command, which writes no file', () => {
+  assert.throws(
+    () => route(['restore', 'id-1', '--out', './x', '--', 'tar', 'xf', '-']),
+    /writes no file/,
+  )
+})
+
+test('the message for a subcommand that cannot take a command names both that can', () => {
+  assert.throws(() => route(['list', '--', 'tar', 'xf', '-']), /npx telstore restore/)
+})
