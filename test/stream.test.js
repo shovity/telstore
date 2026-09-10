@@ -1,10 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { promises as fs } from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
-import { Readable } from 'node:stream'
+import { PassThrough, Readable, Writable } from 'node:stream'
 
-import { ChunkReader } from '../src/stream.js'
+import { ChunkReader, writeChunkTo } from '../src/stream.js'
 
 import { tempDir } from './helpers.js'
 
@@ -247,4 +248,101 @@ test('close does not overwrite the error the source already threw', async () => 
   const second = await fs.open(file, 'w')
   await assert.rejects(() => reader.fill(second, 100), /producer exploded/)
   await second.close()
+})
+
+async function chunkFile(bytes) {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'telstore-stream-'))
+  const file = path.join(dir, 'chunk')
+
+  await fs.writeFile(file, bytes)
+
+  return { handle: await fs.open(file, 'r'), dir }
+}
+
+test('it writes exactly the length it was given, and no more', async () => {
+  const { handle, dir } = await chunkFile(Buffer.from('abcdefghij'))
+  const sink = new PassThrough()
+  const seen = []
+
+  sink.on('data', (bytes) => seen.push(bytes))
+
+  // 4, not 10: the file may be longer than the chunk it holds when a download was cut short,
+  // and the manifest's length is the one that decides.
+  await writeChunkTo(sink, handle, 4)
+  await handle.close()
+  await fs.rm(dir, { recursive: true, force: true })
+
+  assert.equal(Buffer.concat(seen).toString(), 'abcd')
+})
+
+// Two chunks down one pipe is the whole point: the command sees one stream, not one per chunk.
+test('the destination stays open between chunks and the handle survives', async () => {
+  const { handle, dir } = await chunkFile(Buffer.from('abcde'))
+  const sink = new PassThrough()
+  const seen = []
+
+  sink.on('data', (bytes) => seen.push(bytes))
+
+  await writeChunkTo(sink, handle, 5)
+  await writeChunkTo(sink, handle, 5)
+
+  assert.equal(sink.writableEnded, false)
+
+  // Still ours: the read stream must not have closed the fd underneath us.
+  const probe = Buffer.alloc(1)
+  assert.equal((await handle.read(probe, 0, 1, 0)).bytesRead, 1)
+
+  await handle.close()
+  await fs.rm(dir, { recursive: true, force: true })
+  assert.equal(Buffer.concat(seen).toString(), 'abcdeabcde')
+})
+
+test('progress is reported as the bytes go, not in one lump at the end', async () => {
+  const { handle, dir } = await chunkFile(Buffer.alloc(200_000, 1))
+  const sink = new PassThrough({ highWaterMark: 1024 })
+
+  sink.resume()
+
+  let reported = 0
+  let calls = 0
+
+  await writeChunkTo(sink, handle, 200_000, {
+    onProgress: (bytes) => {
+      reported += bytes
+      calls += 1
+    },
+  })
+
+  await handle.close()
+  await fs.rm(dir, { recursive: true, force: true })
+
+  assert.equal(reported, 200_000)
+  assert.ok(calls > 1, `expected several progress calls, got ${calls}`)
+})
+
+// A command that stops reading is the failure this function exists to surface. Silence here
+// would become a restore reported as finished for a command that never saw it.
+test('a destination that fails surfaces the failure', async () => {
+  const { handle, dir } = await chunkFile(Buffer.alloc(64_000, 1))
+  const sink = new Writable({
+    write(_bytes, _encoding, done) {
+      done(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }))
+    },
+  })
+
+  await assert.rejects(() => writeChunkTo(sink, handle, 64_000), /EPIPE/)
+
+  await handle.close()
+  await fs.rm(dir, { recursive: true, force: true })
+})
+
+test('a zero-length chunk writes nothing and does not throw', async () => {
+  const { handle, dir } = await chunkFile(Buffer.alloc(0))
+  const sink = new PassThrough()
+
+  await writeChunkTo(sink, handle, 0)
+  await handle.close()
+  await fs.rm(dir, { recursive: true, force: true })
+
+  assert.equal(sink.readableLength, 0)
 })

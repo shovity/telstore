@@ -1,3 +1,9 @@
+import { promises as fs } from 'node:fs'
+import { Transform } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
+
+import { formatBytes } from './progress.js'
+
 // `handle.write(buffer)` is not guaranteed to write the whole buffer in one call. `bytes`
 // becomes the chunk's recorded length, so trusting an unchecked write would let telstore
 // claim more reached disk than actually did — silently wrong data, the one thing this
@@ -114,5 +120,58 @@ export class ChunkReader {
     } catch {
       // As above.
     }
+  }
+}
+
+// The other direction from ChunkReader, and unlike it this one can use the stream library as
+// it comes. ChunkReader is hand-rolled because it has to stop at a chunk boundary and keep
+// what it did not take; here the whole file is wanted, in order, and `pipeline` already does
+// the two things that matter: it honours backpressure, so a chunk is never buffered in this
+// process, and it rejects when the destination fails instead of going quiet.
+//
+// `{ end: false }` is what makes a command see one stream rather than one per chunk. Measured
+// on node 22 rather than assumed, along with the fact that a FileHandle read stream opened
+// this way leaves the handle open for the next chunk: `autoClose: false`.
+export async function writeChunkTo(writable, handle, length, { onProgress = () => {} } = {}) {
+  // `end: length - 1` is inclusive, so zero has to be turned away before it asks for byte -1.
+  if (length === 0) return
+
+  const counted = new Transform({
+    transform(bytes, _encoding, done) {
+      onProgress(bytes.length)
+      done(null, bytes)
+    },
+  })
+
+  // Not a 'data' listener on the source: attaching one switches the stream to flowing mode and
+  // the backpressure this function exists to honour goes with it.
+  const source = handle.createReadStream({ start: 0, end: length - 1, autoClose: false })
+
+  await pipeline(source, counted, writable, { end: false })
+}
+
+// The borrowing ends whether the chunk went out or the run fell over on it. close() failing
+// must not be what stops the unlink — the file would sit there holding a whole chunk that
+// nothing will ever remove — and a removal that fails must not replace the error already on
+// its way out of the loop, so it is said on stderr rather than thrown.
+//
+// On writeErr rather than warn, like the prune report and for the same reason: a leaked file
+// holding up to 1.8GB is not narration about a transfer that --silent asked to be spared. It
+// is telstore leaving something on this machine that only the user can now clear up, and a
+// caller silencing the progress bar has not asked to be kept in the dark about that.
+export async function discardChunkFile(handle, file, { writeErr, chunkSize }) {
+  try {
+    await handle.close()
+  } catch {
+    // The file is about to be unlinked; whatever close had to say about it changes nothing.
+  }
+
+  try {
+    await fs.rm(file, { force: true })
+  } catch (err) {
+    writeErr(
+      `\nCould not remove the temporary chunk file ${file}: ${err.message}. It holds up to ` +
+        `${formatBytes(chunkSize)} and telstore will not try again — remove it by hand.\n`,
+    )
   }
 }
