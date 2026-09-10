@@ -275,6 +275,27 @@ test('it writes exactly the length it was given, and no more', async () => {
   assert.equal(Buffer.concat(seen).toString(), 'abcd')
 })
 
+// `createReadStream({ start: 0, end: length - 1 })` stops at the file's real end of data and
+// does not complain when `end` reaches past it — measured, not assumed. A download cut short
+// must not be reported as a chunk this function actually moved: the caller downstream adds
+// `length` to its running total, not what this function actually wrote, so a short file here
+// silently becomes a truncated stream handed to somebody's tar and a restore reported as done.
+test('a chunk file shorter than the length it is asked for is refused, not silently truncated', async () => {
+  const { handle, dir } = await chunkFile(Buffer.from('abcd'))
+  const sink = new PassThrough()
+
+  sink.resume()
+
+  await assert.rejects(() => writeChunkTo(sink, handle, 10), (err) => {
+    assert.match(err.message, /4/)
+    assert.match(err.message, /10/)
+    return true
+  })
+
+  await handle.close()
+  await fs.rm(dir, { recursive: true, force: true })
+})
+
 // Two chunks down one pipe is the whole point: the command sees one stream, not one per chunk.
 test('the destination stays open between chunks and the handle survives', async () => {
   const { handle, dir } = await chunkFile(Buffer.from('abcde'))
@@ -318,6 +339,60 @@ test('progress is reported as the bytes go, not in one lump at the end', async (
 
   assert.equal(reported, 200_000)
   assert.ok(calls > 1, `expected several progress calls, got ${calls}`)
+})
+
+// The test above only proves onProgress fires in pieces — a sink in flowing mode (`.resume()`)
+// would report that same shape from an implementation that attached a raw 'data' listener and
+// ignored write()'s return value, which is exactly the backpressure this function exists to
+// honour rather than a readFile and one write: a chunk can be up to 1800MB and must never sit
+// whole in this process's memory. This is the test that can tell the two apart: a destination
+// that never acknowledges a write must stall the read, not finish reading regardless.
+test('a destination that never acknowledges a write stalls the read rather than buffering the whole chunk', async () => {
+  const size = 1_000_000
+  const { handle, dir } = await chunkFile(Buffer.alloc(size, 1))
+
+  // Holds every write() callback until release() is called, so nothing downstream of the first
+  // unacknowledged write can be told "go ahead" — which is what a destination that stopped
+  // reading (a real command whose stdin pipe is full) looks like from here.
+  let gateOpen = false
+  const pendingDones = []
+  const sink = new Writable({
+    write(_bytes, _encoding, done) {
+      if (gateOpen) done()
+      else pendingDones.push(done)
+    },
+  })
+
+  let reported = 0
+  const finished = writeChunkTo(sink, handle, size, {
+    onProgress: (bytes) => {
+      reported += bytes
+    },
+  })
+
+  // A real pause, not a tick: a 1MB file reads from disk in well under this on any machine
+  // this suite runs on, so an implementation that actually honours backpressure stalls and
+  // stays stalled for the whole wait, while one that ignores it finishes reading regardless.
+  await new Promise((resolve) => setTimeout(resolve, 200))
+
+  const stalledAt = reported
+
+  assert.ok(stalledAt > 0, 'expected the first write to have gone through before the stall')
+  assert.ok(
+    stalledAt < size,
+    'a destination that never acknowledges a write must stall the read well short of the ' +
+      `whole ${size}-byte file; saw ${stalledAt} bytes reported with nothing downstream ` +
+      'ever accepting a write',
+  )
+
+  gateOpen = true
+  while (pendingDones.length > 0) pendingDones.shift()()
+
+  await finished
+  await handle.close()
+  await fs.rm(dir, { recursive: true, force: true })
+
+  assert.equal(reported, size)
 })
 
 // A command that stops reading is the failure this function exists to surface. Silence here

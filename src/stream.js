@@ -136,8 +136,11 @@ export async function writeChunkTo(writable, handle, length, { onProgress = () =
   // `end: length - 1` is inclusive, so zero has to be turned away before it asks for byte -1.
   if (length === 0) return
 
+  let seen = 0
+
   const counted = new Transform({
     transform(bytes, _encoding, done) {
+      seen += bytes.length
       onProgress(bytes.length)
       done(null, bytes)
     },
@@ -148,6 +151,20 @@ export async function writeChunkTo(writable, handle, length, { onProgress = () =
   const source = handle.createReadStream({ start: 0, end: length - 1, autoClose: false })
 
   await pipeline(source, counted, writable, { end: false })
+
+  // `createReadStream` stops at the file's real end of data without complaining when `end`
+  // reaches past it, so a chunk file shorter than `length` makes the pipeline above resolve
+  // cleanly having moved too few bytes. That must not be read as success: the caller's running
+  // total is built from `length`, the size it was told to expect, not from what this function
+  // actually moved, so a short chunk here would become a truncated stream handed to somebody's
+  // tar and reported as a finished restore — the one thing this project refuses to do.
+  if (seen !== length) {
+    throw new Error(
+      `The chunk file held ${seen} bytes, but ${length} were asked for — the chunk is ` +
+        'shorter than the manifest says it should be. Refusing to hand the destination a ' +
+        'truncated stream and call it done.',
+    )
+  }
 }
 
 // The borrowing ends whether the chunk went out or the run fell over on it. close() failing
