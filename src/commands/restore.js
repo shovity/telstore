@@ -11,8 +11,10 @@ import { askConfirm } from '../confirm.js'
 import { configFile, defaultConfigDir, loadConfig } from '../config.js'
 import { assertLoggedIn } from '../session.js'
 import { requireChat, resolveSettings } from '../settings.js'
+import { chunkCipher, decryptInPlace } from '../cipher.js'
 import { downloadToFile, hashRange } from '../downloader.js'
-import { parseManifest, safeOutName } from '../manifest.js'
+import { isEncrypted, parseManifest, safeOutName } from '../manifest.js'
+import { askPassword as realAskPassword, unlockManifest } from '../password.js'
 import { createProgress, formatBytes, formatDuration } from '../progress.js'
 import { clearRestore, pruneRestores, restoreKey, saveRestore } from '../state.js'
 
@@ -64,7 +66,7 @@ export async function realDownloadChunk(client, message, handle, offset, onProgr
 // file anyone can edit between runs, and a claim that is wrong here renames a corrupt file
 // into place. Every chunk in the finished file was hashed against the manifest by the run
 // that renamed it, whether this run downloaded it or found it already there.
-async function scanPartial(handle, manifest, log) {
+async function scanPartial(handle, manifest, log, expected) {
   let done = 0
 
   for (const chunk of manifest.chunks) {
@@ -73,7 +75,7 @@ async function scanPartial(handle, manifest, log) {
     // Downloads run in order, so what is already present is a prefix. The first chunk that
     // does not match is where this run starts, and reading past it would hash gigabytes
     // nobody has written yet.
-    if (digest !== chunk.sha256) break
+    if (digest !== expected(chunk)) break
 
     done += 1
     log(`Chunk ${chunk.i + 1}/${manifest.chunks.length} already restored, skipping.`)
@@ -97,6 +99,10 @@ export async function runRestore(backupId, options = {}, deps = {}) {
     log: writeLog = (line) => console.log(line),
     silent = false,
     onBackupId = () => {},
+    askPassword = realAskPassword,
+    interactive = () => Boolean(process.stdin.isTTY),
+    // Passwords that opened an earlier backup in the same batch, tried before asking again.
+    knownPasswords = [],
   } = deps
 
   const config = await loadConfig(configDir)
@@ -123,6 +129,17 @@ export async function runRestore(backupId, options = {}, deps = {}) {
     }
 
     const manifest = parseManifest(await readMessageBytes(client, manifestMessage))
+
+    // Before the overwrite question and before the .partial: a password that cannot be had must
+    // cost nothing, and nobody should answer [y/N] about a file telstore then cannot write.
+    const opened = isEncrypted(manifest)
+      ? await unlockManifest(manifest, { askPassword, interactive, known: knownPasswords, say: log })
+      : null
+
+    // What each finished chunk hashes to in the .partial. A decrypted chunk is plaintext there,
+    // and only the sealed hash says what that plaintext must be.
+    const onDisk = (chunk) => (opened ? opened.plainSha256[chunk.i] : chunk.sha256)
+
     // When the user passes --out, respect that path verbatim.
     const target = path.resolve(options.out ?? safeOutName(manifest.name))
     const partial = `${target}.partial`
@@ -177,6 +194,7 @@ export async function runRestore(backupId, options = {}, deps = {}) {
     }
 
     log(`Backup ${manifest.id}`)
+    if (opened) log('Lock   encrypted')
     log(`File   ${target} (${formatBytes(manifest.size)}, ${manifest.chunks.length} chunks)\n`)
 
     let handle
@@ -209,7 +227,7 @@ export async function runRestore(backupId, options = {}, deps = {}) {
         // that long is the hang this project refuses everywhere: the heading lands before
         // the first read and a line per chunk arrives as the scan advances.
         log(`Checking what is already in ${partial}...`)
-        done = await scanPartial(handle, manifest, log)
+        done = await scanPartial(handle, manifest, log, onDisk)
         if (done === 0) log(`Nothing in ${partial} matches this backup, starting over.`)
         log('')
       }
@@ -283,6 +301,26 @@ export async function runRestore(backupId, options = {}, deps = {}) {
               throw new Error(
                 `Chunk ${chunk.i + 1} has a sha256 that does not match the manifest. The download is kept at ${partial} for inspection.`,
               )
+            }
+
+            // Only after the ciphertext has matched: that match is what proves these are the bytes
+            // that went up, and the manifest's seal is what proves the hash itself. The plaintext
+            // check that follows is the second one, and it exists for telstore's own mistakes.
+            if (opened) {
+              const clear = await decryptInPlace(
+                handle,
+                chunk.i * manifest.chunkSize,
+                chunk.size,
+                chunkCipher(opened.keys.chunkKey, chunk.iv),
+              )
+
+              if (clear !== opened.plainSha256[chunk.i]) {
+                throw new Error(
+                  `Chunk ${chunk.i + 1} matched its encrypted sha256 but decrypted to bytes that do ` +
+                    'not match the manifest. That points at telstore rather than at the backup; ' +
+                    `nothing was renamed, and the download is kept at ${partial} for inspection.`,
+                )
+              }
             }
 
             await note(chunk.i + 1)
@@ -385,11 +423,15 @@ export async function runRestores(backupIds, options = {}, deps = {}) {
   const warn = silent ? () => {} : writeErr
 
   let shared = null
+  // Shared across every id in the batch, so a password that opened the first backup is tried
+  // silently on the rest before asking again.
+  const passwords = []
   const perId = {
     ...deps,
     connect: async (theirConfig, connectOptions) =>
       (shared ??= await connect(theirConfig, connectOptions)),
     disconnect: async () => {},
+    knownPasswords: passwords,
   }
 
   const results = []
