@@ -1,9 +1,11 @@
+import { createHash } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 
 import { MAX_CHUNKS, PART_SIZE } from '../chunking.js'
 import { chunkCaption, manifestCaption, parseNote } from '../caption.js'
 import { chatName, describeChat } from '../chat.js'
+import { chunkCipher, deriveKeys, newIv, newSalt, sealManifest } from '../cipher.js'
 import {
   MESSAGE_BATCH_SIZE,
   closeQuietly,
@@ -18,6 +20,7 @@ import {
   newBackupId,
   serializeManifest,
 } from '../manifest.js'
+import { askNewPassword as realAskNewPassword } from '../password.js'
 import { createStreamProgress, formatBytes, plural } from '../progress.js'
 import { requireChat, resolveSettings } from '../settings.js'
 import { deleteCommand } from '../shell.js'
@@ -67,6 +70,8 @@ export async function runStreamUpload(name, childArgv, options = {}, deps = {}) 
     // `discardChunkFile` can still take it with it. Said before the file is opened and unsaid
     // after it is removed, so the caller's copy is never narrower than what is actually on disk.
     onTempChunk = () => {},
+    askNewPassword = realAskNewPassword,
+    secret = null,
   } = deps
 
   // Before the command is started, let alone connected to Telegram: the note is the one thing
@@ -79,6 +84,20 @@ export async function runStreamUpload(name, childArgv, options = {}, deps = {}) 
   const chat = requireChat(settings)
   const chunkSize = settings.chunkSize
   const concurrency = settings.uploadConcurrency
+
+  // Before the record, the connection and the command: a run that cannot get a password has
+  // nothing to unwind, and nobody should watch pg_dump start before being asked for one. No
+  // check value is kept — a stream is never resumed, so there is no second run to compare with.
+  let keys = null
+  let enc = null
+
+  if (options.encrypt) {
+    const chosen = secret ?? (await askNewPassword())
+    const salt = newSalt()
+
+    keys = await deriveKeys(chosen.password, salt)
+    enc = { salt, ...(chosen.hint ? { hint: chosen.hint } : {}) }
+  }
 
   const id = newBackupId()
   const key = streamKey(id)
@@ -210,6 +229,7 @@ export async function runStreamUpload(name, childArgv, options = {}, deps = {}) 
 
   log(`Backup ${id}`)
   log(`Name   ${name} (chunks of ${formatBytes(chunkSize)})`)
+  if (enc) log(`Lock   encrypted${enc.hint ? ` (hint: ${enc.hint})` : ''}`)
   log(`From   ${childArgv.join(' ')}`)
   log(`To     ${describeChat(chat)}\n`)
 
@@ -292,6 +312,12 @@ export async function runStreamUpload(name, childArgv, options = {}, deps = {}) 
                 progress.setLabel(`Chunk ${count + 1}`)
               }
 
+              // A fresh iv per chunk; see newIv in src/cipher.js for why it is never derived
+              // from the index.
+              const iv = keys ? newIv() : null
+              const cipher = keys ? chunkCipher(keys.chunkKey, iv) : null
+              const plain = keys ? createHash('sha256') : null
+
               // Offset 0 of a file holding exactly this chunk: uploadRange neither knows nor
               // cares that the bytes arrived through a pipe rather than off a disk.
               const { inputFile, sha256 } = await uploadRange(client, handle.fd, {
@@ -302,6 +328,12 @@ export async function runStreamUpload(name, childArgv, options = {}, deps = {}) 
                 partSize,
                 onProgress: (bytes) => progress.advance(bytes),
                 retryOptions: { ...retryOptions, onRetry },
+                transform: cipher
+                  ? (bytes, at) => {
+                      plain.update(bytes)
+                      return cipher.apply(bytes, at)
+                    }
+                  : undefined,
               })
 
               const message = await sendChunk(client, chat, {
@@ -323,7 +355,12 @@ export async function runStreamUpload(name, childArgv, options = {}, deps = {}) 
                 key,
                 state,
                 count,
-                { msgId: message.id, size: filled.bytes, sha256 },
+                {
+                  msgId: message.id,
+                  size: filled.bytes,
+                  sha256,
+                  ...(cipher ? { iv, plainSha256: plain.digest('hex') } : {}),
+                },
                 configDir,
               )
 
@@ -371,14 +408,23 @@ export async function runStreamUpload(name, childArgv, options = {}, deps = {}) 
         throw new Error(`${childArgv[0]} wrote nothing, so there is no backup to make.`)
       }
 
-      const manifest = buildManifest({
+      let manifest = buildManifest({
         id,
         name,
         size,
         chunkSize,
         note,
+        enc,
         chunks: Array.from({ length: count }, (_, i) => ({ i, ...state.done[String(i)] })),
       })
+
+      if (keys) {
+        manifest = sealManifest(
+          manifest,
+          keys,
+          Array.from({ length: count }, (_, i) => state.done[String(i)].plainSha256),
+        )
+      }
 
       const card = await sendManifest(client, chat, {
         bytes: serializeManifest(manifest),
@@ -390,6 +436,8 @@ export async function runStreamUpload(name, childArgv, options = {}, deps = {}) 
           chunks: manifest.chunks.length,
           createdAt: manifest.createdAt,
           note: manifest.note ?? null,
+          encrypted: Boolean(keys),
+          hint: manifest.enc?.hint ?? null,
         }),
       })
 

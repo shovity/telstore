@@ -1,16 +1,27 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { randomBytes } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { Readable } from 'node:stream'
 
 import { runStreamUpload } from '../src/commands/upload-stream.js'
 import { parseManifestCaption } from '../src/caption.js'
+import { chunkCipher, openManifest } from '../src/cipher.js'
 import { saveConfig } from '../src/config.js'
 import { parseManifest } from '../src/manifest.js'
 import { MAX_STATES, findStates, tempDirFor } from '../src/state.js'
 
-import { LOGGED_IN, collect, fakeClient, tempDir, uploadDeps } from './helpers.js'
+import {
+  LOGGED_IN,
+  PASSWORD,
+  collect,
+  fakeClient,
+  passwordDeps,
+  sharesRun,
+  tempDir,
+  uploadDeps,
+} from './helpers.js'
 
 // A producer under test is an async iterable of buffers and a promise: the fake stands in for
 // spawnProducer, not for a shell, so nothing here depends on tar or /bin/sh being anywhere.
@@ -1095,4 +1106,61 @@ test('an abort before the producer starts never starts it', async () => {
 
   assert.deepEqual(spawn.calls, [])
   assert.deepEqual(client.messages, [])
+})
+
+// --- --encrypt ---
+
+test('--encrypt sends the command output as ciphertext under a manifest that opens', async () => {
+  const ws = await workspace()
+  const client = fakeClient()
+  const produced = [randomBytes(100), randomBytes(100), randomBytes(50)]
+  const content = Buffer.concat(produced)
+
+  await runStreamUpload(
+    'a.tar',
+    ['tar', 'cf', '-', './a'],
+    { 'chunk-size': '100', encrypt: true },
+    streamDeps(client, ws, { ...passwordDeps({ hint: 'the cat' }), spawn: fakeSpawn(produced) }),
+  )
+
+  const sent = Buffer.concat(chunkMessages(client).map((m) => m.bytes))
+  assert.equal(sent.length, content.length)
+  assert.equal(sharesRun(sent, content), false)
+
+  const manifest = parseManifest(manifestMessages(client).at(-1).bytes)
+  const opened = await openManifest(manifest, PASSWORD)
+  const clear = Buffer.concat(
+    manifest.chunks.map((chunk, i) =>
+      chunkCipher(opened.keys.chunkKey, chunk.iv).apply(chunkMessages(client)[i].bytes, 0),
+    ),
+  )
+
+  assert.deepEqual(clear, content)
+  assert.equal(manifest.enc.hint, 'the cat')
+  assert.match(manifestMessages(client).at(-1).caption, /🔒 encrypted/)
+})
+
+test('a password that cannot be had stops a stream upload before the command starts', async () => {
+  const ws = await workspace()
+  const client = fakeClient()
+  const spawn = fakeSpawn([TEN])
+
+  await assert.rejects(
+    () =>
+      runStreamUpload(
+        'a.tar',
+        ['tar', 'cf', '-', './a'],
+        { 'chunk-size': '10', encrypt: true },
+        streamDeps(client, ws, {
+          spawn,
+          askNewPassword: async () => {
+            throw new Error('--encrypt needs a terminal')
+          },
+        }),
+      ),
+    /--encrypt needs a terminal/,
+  )
+
+  assert.equal(spawn.calls.length, 0)
+  assert.equal(client.messages.length, 0)
 })
