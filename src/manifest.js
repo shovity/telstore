@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto'
+import path from 'node:path'
 
 import { countChunks } from './chunking.js'
 
@@ -74,6 +75,24 @@ export const MANIFEST_SUFFIX = '.manifest.json'
 
 export function manifestFileName(id) {
   return `${id}${MANIFEST_SUFFIX}`
+}
+
+// manifest.name comes from data downloaded off Telegram — don't trust it when picking
+// a path ourselves. path.basename stops "../../x" but still returns "..", "." or "" for
+// a few pathological names: path.resolve('..') is the parent directory, so a multi-GB
+// file would land outside the current directory and only blow up at rename. Here rather
+// than in restore because join needs it too, and join must not import the network side.
+export function safeOutName(name) {
+  const base = path.basename(String(name ?? ''))
+
+  if (base === '' || base === '.' || base === '..') {
+    throw new Error(
+      `The name in the manifest ("${name}") cannot be used as a file name. ` +
+        'Run again with --out <path> to choose where to write.',
+    )
+  }
+
+  return base
 }
 
 export function buildManifest({
