@@ -335,3 +335,8 @@
   are the ones somebody is checking on. Both a damaged backup and an id nothing could be
   found for count as failures, because the exit code answers one question: did the run find
   everything it was asked to check.
+- **An encrypted backup is manifest version 2, and every restore path checks it in one order:
+  ciphertext sha256, then decrypt, then plaintext sha256.** The version bump is what stops an
+  older telstore restoring ciphertext as the file with every check passing; the order is what
+  keeps "no byte is used before its chunk is verified" true once bytes need decrypting.
+  `docs/design/encryption.md` has the construction and why.

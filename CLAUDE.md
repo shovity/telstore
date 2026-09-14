@@ -66,6 +66,7 @@ anything that row names** — not afterwards, and not only when something looks 
 | `src/sources.js`, `runUploads` / `runRestores` / `runDeletes` / `runVerifies`, batch confirmation | `docs/design/batches.md` |
 | `src/settings.js`, `src/cli.js`, `src/tar.js`, `src/commands/config.js`, any flag | `docs/design/settings-and-flags.md` |
 | `src/caption.js`, `src/commands/list.js`, anything the chat shows | `docs/design/captions.md` |
+| `src/cipher.js`, `src/password.js`, `--encrypt`, anything that encrypts or decrypts chunk bytes | `docs/design/encryption.md`, `docs/design/data-integrity.md` |
 | `src/client.js`, `src/uploader.js`, `src/downloader.js`, `bin/telstore.js` | `docs/design/module-boundaries.md` |
 | `src/spawn.js`, the temp chunks under `~/.telstore/tmp` | `docs/design/module-boundaries.md`, `docs/design/data-integrity.md` |
 | `src/prompt.js`, `src/confirm.js`, `src/progress.js`, anything a terminal draws | `docs/design/terminal-prompts.md` |

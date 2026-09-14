@@ -203,3 +203,10 @@
   are that session's. The remembered-answer lifetime was watched once. What it does *not*
   explain is why 2026-09-07 lasted hours when 2026-09-08 lasted thirteen minutes, and anyone
   building on this should treat that gap as unexplained rather than rounding it to a number.
+
+- **An encrypted backup's card carries `🔒 encrypted` and, when there is one, `💡 <hint>`**, between
+  the note and the restore line. Both are optional markers, like the note, so every older card
+  still parses. `list` shows a `LOCK` column only when some row is encrypted — the `NOTE` rule —
+  with the hint shortened to 40 characters, because that is where someone who forgot a password
+  looks first. The hint `restore` prints above its prompt comes from the manifest, which is
+  authenticated, never from the caption, which is not.

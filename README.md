@@ -181,6 +181,24 @@ one. That is also how your data is compressed or encrypted **before** it reaches
 stderr is left as it is, so one that fails explains itself in its own words and telstore adds
 only the exit code and what it did about it.
 
+## Encrypting a backup
+
+```bash
+npx telstore photos.tar --encrypt
+npx telstore tarc photos.tar.gz ./photos --encrypt
+```
+
+telstore asks for a password twice and for an optional hint, then encrypts every chunk before
+it leaves the machine (AES-256-CTR, the key derived with scrypt, the manifest sealed with
+AES-256-GCM). `restore`, `tarx` and `join` see that a backup is encrypted, print its hint, and
+ask for the password. The hint is shown in the chat as plain text — telstore refuses one that
+contains the password.
+
+What stays readable to anyone who can read the chat: the file name, the note, the size, the
+number of chunks, the dates and the hint. **A forgotten password is a lost backup** — nothing
+can recover it. The password is only ever typed at a terminal; for unattended encrypted
+backups, use `--` with a key-based tool such as `age`.
+
 ## Checking a backup is still there
 
 A backup is a set of messages in a chat, and messages can be deleted by hand. `list` reads
@@ -290,9 +308,9 @@ There is no expiry and no revocation: to end a session for good, terminate it un
 
 ## Limits worth knowing
 
-- **Your data is not encrypted.** Don't upload anything you would mind sitting on someone
-  else's infrastructure — the one thing telstore encrypts is a session token, and that
-  protects your login rather than your files.
+- **Your data is not encrypted unless you pass `--encrypt`.** Without it, don't upload anything
+  you would mind sitting on someone else's infrastructure. With it, the contents are encrypted
+  but the file name, note, size and hint are not, and a forgotten password cannot be recovered.
 - A chunk cannot exceed 1950MB: Telegram accepts at most 4000 parts of 512KB per file.
 - **A backup made from a command cannot be resumed**, so a run that fails or is interrupted
   removes the chunks it had already sent instead of keeping them. Ctrl-C takes a moment longer
