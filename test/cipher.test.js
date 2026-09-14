@@ -170,3 +170,23 @@ test('decryptInPlace turns a range back into plaintext and leaves the rest alone
   assert.equal(digest, sha(clear))
   assert.deepEqual(await fs.readFile(file), Buffer.concat([Buffer.from('JUNK'), clear, Buffer.from('TAIL')]))
 })
+
+// A write that returns having written nothing, forever, is a loop that never ends. The handle is
+// faked because no real file on a test machine refuses a write that way on demand.
+test('decryptInPlace refuses a write that makes no progress rather than spinning', async () => {
+  const cipher = chunkCipher(KEYS.chunkKey, newIv())
+  let writes = 0
+  const handle = {
+    async read(buffer, offset, length) {
+      buffer.fill(1, offset, offset + length)
+      return { bytesRead: length }
+    },
+    async write() {
+      writes += 1
+      return { bytesWritten: 0 }
+    },
+  }
+
+  await assert.rejects(() => decryptInPlace(handle, 0, 32, cipher), /Short write/)
+  assert.equal(writes, 1)
+})

@@ -4,12 +4,13 @@ import { randomBytes } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 
-import { runUploads } from '../src/commands/upload.js'
+import { runUpload, runUploads } from '../src/commands/upload.js'
 
+import { chunkCipher, openManifest } from '../src/cipher.js'
 import { saveConfig } from '../src/config.js'
 import { parseManifest } from '../src/manifest.js'
 
-import { LOGGED_IN, collect, fakeClient, passwordDeps, tempDir, uploadDeps } from './helpers.js'
+import { LOGGED_IN, PASSWORD, collect, fakeClient, passwordDeps, tempDir, uploadDeps } from './helpers.js'
 
 // Every file gets its own bytes so a mixed-up chunk shows as a mismatch, not as a pass.
 async function tempWorkspace(sizes) {
@@ -588,4 +589,64 @@ test('a batch with --encrypt asks for one password, and every file gets its own 
 
   assert.equal(salts.length, 2)
   assert.notEqual(salts[0], salts[1])
+})
+
+// The batch asks one new password after the confirm, whether or not a file resumes. A resumed
+// file checks it against its own record, and a mismatch is that file's failure alone: the
+// chunks it already sent are under another key, and the rest of the batch owes it nothing.
+test('a batch with --encrypt fails a resumed file whose record rejects the password, and uploads the rest', async () => {
+  const ws = await tempWorkspace([1000, 300])
+  const earlier = fakeClient({ failOnChunk: 1 })
+
+  await assert.rejects(() =>
+    runUpload(
+      ws.paths[0],
+      { chat: '@store', 'chunk-size': '400', encrypt: true },
+      {
+        ...uploadDeps(earlier),
+        ...passwordDeps({ password: 'the first password' }),
+        configDir: ws.configDir,
+        partSize: 128,
+        silent: true,
+      },
+    ),
+  )
+
+  const client = fakeClient()
+  const out = collect()
+
+  const { results, failed } = await runUploads(
+    ws.paths,
+    { chat: '@store', 'chunk-size': '400', yes: true, encrypt: true },
+    {
+      ...uploadDeps(client),
+      ...passwordDeps(),
+      configDir: ws.configDir,
+      partSize: 128,
+      log: out.log,
+      writeErr: () => {},
+    },
+  )
+
+  assert.equal(failed, 1)
+  assert.match(results[0].error, /not the password backup telstore-\d{8}-[0-9a-f]{6} was started with/)
+  assert.match(out.text(), /2 files: 1 uploaded, 1 failed\./)
+  assert.match(out.text(), /data-0\.tar\s+failed: That is not the password/)
+
+  // Nothing of the failed file went out under the new password: this connection carried the
+  // second file's one chunk and its manifest, and nothing else.
+  assert.equal(client.messages.length, 2)
+  assert.equal(client.messages.filter((m) => m.fileName.endsWith('.manifest.json')).length, 1)
+
+  const manifest = parseManifest(client.messages.find((m) => m.fileName.endsWith('.manifest.json')).bytes)
+  assert.equal(manifest.id, results[1].id)
+
+  const opened = await openManifest(manifest, PASSWORD)
+  const clear = Buffer.concat(
+    manifest.chunks.map((chunk) =>
+      chunkCipher(opened.keys.chunkKey, chunk.iv).apply(client.messages.find((m) => m.id === chunk.msgId).bytes, 0),
+    ),
+  )
+
+  assert.deepEqual(clear, ws.files[1].content)
 })

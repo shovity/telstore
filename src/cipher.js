@@ -178,6 +178,13 @@ async function writeFully(handle, buffer, position) {
 
   while (written < buffer.length) {
     const { bytesWritten } = await handle.write(buffer, written, buffer.length - written, position + written)
+
+    // readFully's guard, for the same reason: a write that makes no progress would spin here
+    // forever rather than fail, and a .partial half-decrypted with nobody told is the worst end.
+    if (bytesWritten === 0) {
+      throw new Error(`Short write: ${buffer.length - written} bytes at offset ${position + written} would not go to disk.`)
+    }
+
     written += bytesWritten
   }
 }

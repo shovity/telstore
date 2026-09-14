@@ -192,7 +192,8 @@ telstore asks for a password twice and for an optional hint, then encrypts every
 it leaves the machine (AES-256-CTR, the key derived with scrypt, the manifest sealed with
 AES-256-GCM). `restore`, `tarx` and `join` see that a backup is encrypted, print its hint, and
 ask for the password. The hint is shown in the chat as plain text — telstore refuses one that
-contains the password.
+contains the password. If telstore ever restores a backup you encrypted without asking for its
+password, the manifest in the chat has been replaced: do not trust the result.
 
 What stays readable to anyone who can read the chat: the file name, the note, the size, the
 number of chunks, the dates and the hint. **A forgotten password is a lost backup** — nothing

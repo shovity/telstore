@@ -56,6 +56,13 @@
   keys: a record under the other one is the encrypt/plain mismatch refusal, and a record whose
   `enc` disagrees with the key it is filed under is refused as damaged in either direction —
   never resumed in plain.
+- **A batch with `--encrypt` asks one new password, and its hint, after the confirm — even when
+  some of its files resume.** `runUploads` cannot know which files have a record without doing
+  `runUpload`'s own lookup a second time, and one question for the batch is the promise. Each
+  resumed file then checks that password against the HMAC check in its own record: a file
+  started under a different one fails alone, named in the summary, and the others carry on. The
+  new hint is not applied to resumed files — their record's hint stays, because it belongs to
+  the password the chunks already in the chat were encrypted with.
 - **The hint is capped at 100 characters because that is what the caption has left** — measured
   2026-09-14, the worst card without encryption is 899 of 1024.
 - **What is not promised:** the name, note, size, chunk count, dates and hint are readable by
