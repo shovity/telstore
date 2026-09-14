@@ -7,8 +7,9 @@ import path from 'node:path'
 import { runUploads } from '../src/commands/upload.js'
 
 import { saveConfig } from '../src/config.js'
+import { parseManifest } from '../src/manifest.js'
 
-import { LOGGED_IN, collect, fakeClient, tempDir, uploadDeps } from './helpers.js'
+import { LOGGED_IN, collect, fakeClient, passwordDeps, tempDir, uploadDeps } from './helpers.js'
 
 // Every file gets its own bytes so a mixed-up chunk shows as a mismatch, not as a pass.
 async function tempWorkspace(sizes) {
@@ -565,4 +566,26 @@ test('a missing file in a batch alongside a note names the quoting mistake', asy
   )
 
   assert.equal(client.messages.length, 0)
+})
+
+test('a batch with --encrypt asks for one password, and every file gets its own salt', async () => {
+  const ws = await tempWorkspace([500, 300])
+  const client = fakeClient()
+  const asked = []
+
+  const { failed } = await runUploads(
+    ws.paths,
+    { chat: '@store', 'chunk-size': '400', yes: true, encrypt: true },
+    { ...uploadDeps(client), ...passwordDeps({ asked }), configDir: ws.configDir, partSize: 128, silent: true },
+  )
+
+  assert.equal(failed, 0)
+  assert.deepEqual(asked, ['new'])
+
+  const salts = client.messages
+    .filter((m) => m.fileName.endsWith('.manifest.json'))
+    .map((m) => parseManifest(m.bytes).enc.salt)
+
+  assert.equal(salts.length, 2)
+  assert.notEqual(salts[0], salts[1])
 })

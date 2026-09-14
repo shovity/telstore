@@ -39,7 +39,11 @@ function field(label, value) {
 function resumeCommand(state, destination) {
   const matches = destination !== null && state.chat === String(destination)
 
-  return `npx telstore ${shellArg(state.path)}${matches ? '' : ` --chat ${shellArg(state.chat)}`}`
+  // An encrypted record refuses a run without --encrypt, so a line without it would be a command
+  // telstore prints to be pasted and then turns away.
+  const encrypt = state.enc ? ' --encrypt' : ''
+
+  return `npx telstore ${shellArg(state.path)}${encrypt}${matches ? '' : ` --chat ${shellArg(state.chat)}`}`
 }
 
 // status is the command someone runs *because* something is wrong, so a record a truncated

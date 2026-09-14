@@ -6,11 +6,12 @@ import path from 'node:path'
 
 import { runUpload } from '../src/commands/upload.js'
 import { parseManifestCaption } from '../src/caption.js'
+import { chunkCipher, openManifest } from '../src/cipher.js'
 import { parseManifest } from '../src/manifest.js'
 import { saveConfig } from '../src/config.js'
 import { loadState, stateFile, stateKey, MAX_STATES } from '../src/state.js'
 
-import { fakeClient, tempDir, uploadDeps } from './helpers.js'
+import { PASSWORD, fakeClient, passwordDeps, sharesRun, tempDir, uploadDeps } from './helpers.js'
 
 async function tempWorkspace(fileSize) {
   const dir = await tempDir('upload-cmd')
@@ -1151,4 +1152,195 @@ test('a one-word note with nothing after it draws no advice about quoting', asyn
       return true
     },
   )
+})
+
+// --- --encrypt ---
+
+function sha256Of(bytes) {
+  return createHash('sha256').update(bytes).digest('hex')
+}
+
+function encryptedRun(client, ws, extra = {}) {
+  return { ...deps(client), ...passwordDeps(), configDir: ws.configDir, partSize: 128, silent: true, ...extra }
+}
+
+// The test the whole feature needs most: without a transform wired in, every round trip passes
+// and plaintext goes up. So this looks at what the chat received.
+test('--encrypt sends ciphertext, and the manifest opens with the password', async () => {
+  const ws = await tempWorkspace(1000)
+  const client = fakeClient()
+
+  const result = await runUpload(
+    ws.filePath,
+    { chat: '@store', 'chunk-size': '400', encrypt: true },
+    encryptedRun(client, ws, passwordDeps({ hint: 'the cat' })),
+  )
+
+  const chunks = client.messages.filter((m) => !m.fileName.endsWith('.manifest.json'))
+  const sent = Buffer.concat(chunks.map((m) => m.bytes))
+
+  assert.equal(result.chunks, 3)
+  assert.equal(sent.length, ws.content.length)
+  assert.equal(sharesRun(sent, ws.content), false)
+
+  const manifest = parseManifest(client.messages.at(-1).bytes)
+  assert.equal(manifest.v, 2)
+  assert.equal(manifest.enc.hint, 'the cat')
+
+  const opened = await openManifest(manifest, PASSWORD)
+  assert.ok(opened)
+  assert.deepEqual(
+    opened.plainSha256,
+    [0, 400, 800].map((at) => sha256Of(ws.content.subarray(at, at + 400))),
+  )
+
+  const clear = Buffer.concat(
+    manifest.chunks.map((chunk, i) => chunkCipher(opened.keys.chunkKey, chunk.iv).apply(chunks[i].bytes, 0)),
+  )
+  assert.deepEqual(clear, ws.content)
+  assert.match(client.messages.at(-1).caption, /🔒 encrypted\n💡 the cat/)
+})
+
+test('without --encrypt nobody is asked for a password and the manifest stays version 1', async () => {
+  const ws = await tempWorkspace(1000)
+  const client = fakeClient()
+  const refuse = async () => {
+    throw new Error('should not have asked')
+  }
+
+  await runUpload(
+    ws.filePath,
+    { chat: '@store', 'chunk-size': '400' },
+    { ...deps(client), configDir: ws.configDir, partSize: 128, silent: true, askNewPassword: refuse, askPassword: refuse },
+  )
+
+  assert.equal(parseManifest(client.messages.at(-1).bytes).v, 1)
+})
+
+test('the record of an unfinished encrypted upload holds a salt and a check, never the password', async () => {
+  const ws = await tempWorkspace(1000)
+  const stat = await fs.stat(ws.filePath)
+
+  await assert.rejects(() =>
+    runUpload(
+      ws.filePath,
+      { chat: '@store', 'chunk-size': '400', encrypt: true },
+      encryptedRun(fakeClient({ failOnChunk: 1 }), ws),
+    ),
+  )
+
+  const file = stateFile(stateKey(ws.filePath, stat.size, stat.mtimeMs), ws.configDir)
+  const text = await fs.readFile(file, 'utf8')
+  const state = JSON.parse(text)
+
+  assert.match(state.enc.salt, /^[0-9a-f]{32}$/)
+  assert.match(state.enc.check, /^[0-9a-f]{64}$/)
+  assert.match(state.done['0'].iv, /^[0-9a-f]{16}$/)
+  assert.match(state.done['0'].plainSha256, /^[0-9a-f]{64}$/)
+  assert.equal(text.includes(PASSWORD), false)
+})
+
+test('a resumed encrypted upload asks for the password once and finishes a backup that decrypts', async () => {
+  const ws = await tempWorkspace(1000)
+  const first = fakeClient({ failOnChunk: 1 })
+
+  await assert.rejects(() =>
+    runUpload(ws.filePath, { chat: '@store', 'chunk-size': '400', encrypt: true }, encryptedRun(first, ws)),
+  )
+
+  const second = fakeClient()
+  const asked = []
+
+  await runUpload(
+    ws.filePath,
+    { chat: '@store', 'chunk-size': '400', encrypt: true },
+    encryptedRun(second, ws, passwordDeps({ asked })),
+  )
+
+  assert.equal(asked.length, 1)
+  assert.match(asked[0], /^Password for telstore-/)
+
+  const manifest = parseManifest(second.messages.at(-1).bytes)
+  const opened = await openManifest(manifest, PASSWORD)
+  const all = [...first.messages, ...second.messages]
+  const clear = Buffer.concat(
+    manifest.chunks.map((chunk) =>
+      chunkCipher(opened.keys.chunkKey, chunk.iv).apply(all.find((m) => m.id === chunk.msgId).bytes, 0),
+    ),
+  )
+
+  assert.deepEqual(clear, ws.content)
+})
+
+test('a resumed encrypted upload refuses a different password and keeps its record', async () => {
+  const ws = await tempWorkspace(1000)
+  const stat = await fs.stat(ws.filePath)
+
+  await assert.rejects(() =>
+    runUpload(ws.filePath, { chat: '@store', 'chunk-size': '400', encrypt: true }, encryptedRun(fakeClient({ failOnChunk: 1 }), ws)),
+  )
+
+  await assert.rejects(
+    () =>
+      runUpload(
+        ws.filePath,
+        { chat: '@store', 'chunk-size': '400', encrypt: true },
+        encryptedRun(fakeClient(), ws, passwordDeps({ password: 'not it' })),
+      ),
+    /not the password backup telstore-\d{8}-[0-9a-f]{6} was started with/,
+  )
+
+  assert.ok(await loadState(stateKey(ws.filePath, stat.size, stat.mtimeMs), ws.configDir))
+})
+
+test('an unfinished encrypted upload is refused without --encrypt', async () => {
+  const ws = await tempWorkspace(1000)
+
+  await assert.rejects(() =>
+    runUpload(ws.filePath, { chat: '@store', 'chunk-size': '400', encrypt: true }, encryptedRun(fakeClient({ failOnChunk: 1 }), ws)),
+  )
+
+  await assert.rejects(
+    () => runUpload(ws.filePath, { chat: '@store', 'chunk-size': '400' }, encryptedRun(fakeClient(), ws)),
+    /is encrypted, and this run has no --encrypt/,
+  )
+})
+
+test('an unfinished plain upload is refused with --encrypt', async () => {
+  const ws = await tempWorkspace(1000)
+
+  await assert.rejects(() =>
+    runUpload(ws.filePath, { chat: '@store', 'chunk-size': '400' }, encryptedRun(fakeClient({ failOnChunk: 1 }), ws)),
+  )
+
+  await assert.rejects(
+    () => runUpload(ws.filePath, { chat: '@store', 'chunk-size': '400', encrypt: true }, encryptedRun(fakeClient(), ws)),
+    /is not encrypted, and this run asks for --encrypt/,
+  )
+})
+
+test('a password that cannot be had stops the run before a record or a connection', async () => {
+  const ws = await tempWorkspace(1000)
+  const stat = await fs.stat(ws.filePath)
+  let connected = false
+
+  await assert.rejects(
+    () =>
+      runUpload(
+        ws.filePath,
+        { chat: '@store', 'chunk-size': '400', encrypt: true },
+        encryptedRun(fakeClient(), ws, {
+          connect: async () => {
+            connected = true
+          },
+          askNewPassword: async () => {
+            throw new Error('--encrypt needs a terminal')
+          },
+        }),
+      ),
+    /--encrypt needs a terminal/,
+  )
+
+  assert.equal(connected, false)
+  assert.equal(await loadState(stateKey(ws.filePath, stat.size, stat.mtimeMs), ws.configDir), null)
 })

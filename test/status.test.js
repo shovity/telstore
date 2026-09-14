@@ -869,6 +869,32 @@ test('a tmp directory that cannot be read is named, and does not stop the report
 // that stops short of it takes it with it. `telstore status | head` is the reachable version —
 // the pipe closes under a write partway down a record block — and a damaged record that learns
 // to throw later would be the other. Either way one bad record must not hide 1.8GB of disk.
+test('the resume command of an encrypted upload carries --encrypt', async () => {
+  const configDir = await tempDir('status')
+  await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)
+
+  const file = path.join(configDir, 'data.tar')
+  await fs.writeFile(file, Buffer.alloc(1000))
+  const stat = await fs.stat(file)
+
+  await saveState(
+    stateKey(file, stat.size, stat.mtimeMs),
+    {
+      id: 'telstore-20260914-ab12cd',
+      chat: '@my_backups',
+      path: file,
+      size: stat.size,
+      mtimeMs: stat.mtimeMs,
+      chunkSize: 400,
+      enc: { salt: '0'.repeat(32), check: '0'.repeat(64) },
+      done: {},
+    },
+    configDir,
+  )
+
+  assert.match(await report(configDir), new RegExp(`Resume\\s+npx telstore ${file} --encrypt$`, 'm'))
+})
+
 test('a record block that dies mid-print does not take the buffered chunks with it', async () => {
   const configDir = await tempDir('status')
   await saveConfig({ ...LOGGED_IN, settings: { chat: '@my_backups' } }, configDir)

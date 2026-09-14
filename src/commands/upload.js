@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 
@@ -6,10 +7,12 @@ import { CustomFile } from 'teleproto/client/uploads.js'
 
 import { PART_SIZE, planChunks } from '../chunking.js'
 import { chunkCaption, manifestCaption, parseNote } from '../caption.js'
+import { chunkCipher, deriveKeys, newIv, newSalt, passwordCheck, sealManifest } from '../cipher.js'
 import { describeChat } from '../chat.js'
 import { closeQuietly, connect as realConnect } from '../client.js'
 import { askConfirm } from '../confirm.js'
 import { configFile, defaultConfigDir, loadConfig } from '../config.js'
+import { askNewPassword as realAskNewPassword, askPassword as realAskPassword } from '../password.js'
 import { expandSources } from '../sources.js'
 import { assertLoggedIn } from '../session.js'
 import { requireChat, resolveSettings } from '../settings.js'
@@ -139,6 +142,31 @@ async function statSource(absPath, { note = null, filesAfterNote = false } = {})
   return stat
 }
 
+// The plaintext hashes the seal carries, read from the record that collected them one chunk at
+// a time — possibly across several runs. A record that lost one cannot produce a manifest that
+// decrypts, and sending one anyway would be a backup that restores to nothing.
+function plainHashesOf(state, chunks, file) {
+  return chunks.map((chunk) => {
+    const entry = state.done[String(chunk.i)]
+
+    if (
+      typeof entry?.iv !== 'string' ||
+      !/^[0-9a-f]{16}$/.test(entry.iv) ||
+      typeof entry.plainSha256 !== 'string' ||
+      !/^[0-9a-f]{64}$/.test(entry.plainSha256)
+    ) {
+      throw new Error(
+        `The record of this unfinished backup has no encryption details for chunk ${chunk.i + 1}, ` +
+          `so telstore cannot write a manifest that decrypts it. ${file} is damaged — delete it ` +
+          'and run again to start a new backup, which leaves the chunks already sent sitting in ' +
+          'the chat with nothing to point at them.',
+      )
+    }
+
+    return entry.plainSha256
+  })
+}
+
 export async function runUpload(filePath, options = {}, deps = {}) {
   const {
     connect = realConnect,
@@ -155,6 +183,10 @@ export async function runUpload(filePath, options = {}, deps = {}) {
     // Where on the command line the note sat, as `route` saw it. Nothing else can know, and
     // a run that never says leaves the advice unsaid rather than guessed at.
     filesAfterNote = false,
+    askNewPassword = realAskNewPassword,
+    askPassword = realAskPassword,
+    // A batch asks once and hands the answer to every file, rather than once per file.
+    secret = null,
   } = deps
 
   const absPath = path.resolve(filePath)
@@ -227,6 +259,72 @@ export async function runUpload(filePath, options = {}, deps = {}) {
     )
   }
 
+  const encrypt = Boolean(options.encrypt)
+
+  // An unfinished backup is encrypted or it is not, and the chunks already in the chat decide
+  // which. Carrying on the other way would mix plaintext and ciphertext in one backup no manifest
+  // could describe, so a run that disagrees is refused the way a disagreeing --chunk-size is.
+  if (resuming && Boolean(state.enc) !== encrypt) {
+    const file = stateFile(key, configDir)
+
+    throw new Error(
+      state.enc
+        ? `This unfinished backup is encrypted, and this run has no --encrypt. Run again with ` +
+            `--encrypt to carry on, or delete ${file} and run again to start a new backup, which ` +
+            'leaves the chunks already sent sitting in the chat with nothing to point at them.'
+        : `This unfinished backup is not encrypted, and this run asks for --encrypt — the chunks ` +
+            `already in ${state.chat} went up as they are. Run again without --encrypt to carry ` +
+            `on, or delete ${file} and run again to start a new, encrypted backup, which leaves ` +
+            'the chunks already sent sitting in the chat with nothing to point at them.',
+    )
+  }
+
+  let keys = null
+  let enc = null
+
+  if (encrypt && resuming) {
+    if (
+      typeof state.enc?.salt !== 'string' ||
+      !/^[0-9a-f]{32}$/.test(state.enc.salt) ||
+      typeof state.enc.check !== 'string'
+    ) {
+      throw new Error(
+        'The record of this unfinished backup says it is encrypted but does not carry what is ' +
+          `needed to carry on encrypting it. ${stateFile(key, configDir)} is damaged — delete it ` +
+          'and run again to start a new backup, which leaves the chunks already sent sitting in ' +
+          'the chat with nothing to point at them.',
+      )
+    }
+
+    // The password is asked for again rather than kept: nothing on this disk can decrypt the
+    // chunks already in the chat. The check refuses a different one, which would put two keys
+    // into a single backup.
+    const password =
+      secret?.password ??
+      (await askPassword(`Password for ${state.id}${state.enc.hint ? ` (hint: ${state.enc.hint})` : ''}: `))
+
+    keys = await deriveKeys(password, state.enc.salt)
+
+    if (passwordCheck(keys) !== state.enc.check) {
+      throw new Error(
+        `That is not the password backup ${state.id} was started with, and the chunks already in ` +
+          `${state.chat} are encrypted with that one. Run again and type the first password, or ` +
+          `delete ${stateFile(key, configDir)} and run again to start a new backup, which leaves ` +
+          'the chunks already sent sitting in the chat with nothing to point at them.',
+      )
+    }
+
+    enc = state.enc
+  } else if (encrypt) {
+    // Before the record and before the connection: a run that cannot get a password has written
+    // nothing and opened nothing.
+    const chosen = secret ?? (await askNewPassword())
+    const salt = newSalt()
+
+    keys = await deriveKeys(chosen.password, salt)
+    enc = { salt, check: passwordCheck(keys), ...(chosen.hint ? { hint: chosen.hint } : {}) }
+  }
+
   if (!resuming) {
     state = {
       id: newBackupId(),
@@ -235,6 +333,7 @@ export async function runUpload(filePath, options = {}, deps = {}) {
       size: stat.size,
       mtimeMs: stat.mtimeMs,
       chunkSize,
+      ...(enc ? { enc } : {}),
       done: {},
     }
     await saveState(key, state, configDir)
@@ -260,6 +359,7 @@ export async function runUpload(filePath, options = {}, deps = {}) {
 
   log(`Backup ${state.id}`)
   log(`File   ${absPath} (${formatBytes(stat.size)}, ${chunks.length} chunks)`)
+  if (enc) log(`Lock   encrypted${enc.hint ? ` (hint: ${enc.hint})` : ''}`)
   log(`To     ${describeChat(chat)}\n`)
 
   const client = await connect(config, { verbose: settings.verbose })
@@ -303,6 +403,12 @@ export async function runUpload(filePath, options = {}, deps = {}) {
           const handle = await fs.open(absPath, 'r')
 
           try {
+            // A fresh iv per attempt at this chunk; see newIv in src/cipher.js for why it is never
+            // derived from the index.
+            const iv = keys ? newIv() : null
+            const cipher = keys ? chunkCipher(keys.chunkKey, iv) : null
+            const plain = keys ? createHash('sha256') : null
+
             const { inputFile, sha256 } = await uploadRange(client, handle.fd, {
               offset: chunk.offset,
               length: chunk.length,
@@ -311,6 +417,12 @@ export async function runUpload(filePath, options = {}, deps = {}) {
               partSize,
               onProgress: (bytes) => progress.advance(bytes),
               retryOptions: { ...retryOptions, onRetry },
+              transform: cipher
+                ? (bytes, at) => {
+                    plain.update(bytes)
+                    return cipher.apply(bytes, at)
+                  }
+                : undefined,
             })
 
             const message = await sendChunk(client, chat, {
@@ -323,7 +435,12 @@ export async function runUpload(filePath, options = {}, deps = {}) {
               key,
               state,
               chunk.i,
-              { msgId: message.id, size: chunk.length, sha256 },
+              {
+                msgId: message.id,
+                size: chunk.length,
+                sha256,
+                ...(cipher ? { iv, plainSha256: plain.digest('hex') } : {}),
+              },
               configDir,
             )
           } finally {
@@ -351,14 +468,17 @@ export async function runUpload(filePath, options = {}, deps = {}) {
       )
     }
 
-    const manifest = buildManifest({
+    let manifest = buildManifest({
       id: state.id,
       name: path.basename(absPath),
       size: stat.size,
       chunkSize,
       note,
+      enc: enc ? { salt: enc.salt, ...(enc.hint ? { hint: enc.hint } : {}) } : null,
       chunks: chunks.map((chunk) => ({ i: chunk.i, ...state.done[String(chunk.i)] })),
     })
+
+    if (keys) manifest = sealManifest(manifest, keys, plainHashesOf(state, chunks, stateFile(key, configDir)))
 
     await sendManifest(client, chat, {
       bytes: serializeManifest(manifest),
@@ -370,6 +490,8 @@ export async function runUpload(filePath, options = {}, deps = {}) {
         chunks: manifest.chunks.length,
         createdAt: manifest.createdAt,
         note: manifest.note ?? null,
+        encrypted: Boolean(keys),
+        hint: manifest.enc?.hint ?? null,
       }),
     })
 
@@ -402,6 +524,7 @@ export async function runUploads(filePaths, options = {}, deps = {}) {
     confirm = askConfirm,
     interactive = () => Boolean(process.stdin.isTTY),
     filesAfterNote = false,
+    askNewPassword = realAskNewPassword,
   } = deps
 
   const log = silent ? () => {} : writeLog
@@ -488,12 +611,17 @@ export async function runUploads(filePaths, options = {}, deps = {}) {
     }
   }
 
+  // Once, after the list has been confirmed: nobody should type a password for a batch they are
+  // about to cancel. Every file still gets a salt of its own inside runUpload.
+  const secret = options.encrypt ? await askNewPassword() : null
+
   let shared = null
   const perFile = {
     ...deps,
     connect: async (theirConfig, connectOptions) =>
       (shared ??= await connect(theirConfig, connectOptions)),
     disconnect: async () => {},
+    secret,
   }
 
   const results = []

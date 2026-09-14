@@ -36,6 +36,13 @@ export function collect() {
   }
 }
 
+// Shared across every fakeClient() in the process, not reset per instance: real Telegram message
+// ids increase for a chat forever and are never reused, which matters the moment a test resumes
+// an upload with a second fakeClient() standing in for a second connection to the same chat — two
+// instances that both started counting from the same base would hand two different chunks the
+// same id, and a test that looks a chunk up by id would silently read the wrong one.
+let sharedNextId = 1000
+
 /**
  * Fake client that collects every part by fileId and, when sendFile is called,
  * "seals" the uploaded content into a message with an increasing id.
@@ -43,7 +50,6 @@ export function collect() {
 export function fakeClient({ failOnChunk = null } = {}) {
   const parts = new Map()
   const messages = []
-  let nextId = 1000
 
   return {
     messages,
@@ -66,14 +72,14 @@ export function fakeClient({ failOnChunk = null } = {}) {
         [...collected].sort((a, b) => a.index - b.index).map((p) => p.bytes),
       )
 
-      nextId += 1
-      const message = { id: nextId, peer, fileName, caption, bytes }
+      sharedNextId += 1
+      const message = { id: sharedNextId, peer, fileName, caption, bytes }
       messages.push(message)
       return message
     },
     async sendManifest(peer, { bytes, fileName, caption }) {
-      nextId += 1
-      const message = { id: nextId, peer, fileName, caption, bytes }
+      sharedNextId += 1
+      const message = { id: sharedNextId, peer, fileName, caption, bytes }
       messages.push(message)
       return message
     },
