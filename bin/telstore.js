@@ -38,8 +38,9 @@ let settled = false
 // This process is already on its way out, and has already said why.
 let leaving = false
 
-// The chunk file a stream upload is buffering into right now, or null. The run removes its
-// own on every ending it gets to run code for; this exists for the one ending it does not.
+// The chunk file a stream upload is buffering into right now, or the half-joined file a join
+// is writing, or null. The run removes its own on every ending it gets to run code for; this
+// exists for the one ending it does not.
 let tempChunk = null
 
 // The command a streaming restore is feeding, if one is running. A stream upload unwinds
@@ -99,8 +100,8 @@ function dropTempChunk() {
     if (err.code === 'ENOENT') return ''
 
     return (
-      `\nThe chunk telstore was buffering is still on this machine: ${file} ` +
-      `(${err.message}). It holds up to one chunk — remove it by hand.\n`
+      `\nThe temporary file telstore was writing is still on this machine: ${file} ` +
+      `(${err.message}). Nothing needs it — remove it by hand.\n`
     )
   }
 }
@@ -407,6 +408,19 @@ async function main() {
       const { failed } = await runDeletes(parsed.args, parsed.options)
 
       if (failed > 0) process.exitCode = 1
+      return
+    }
+
+    case 'join': {
+      const { runJoin } = await import('../src/commands/join.js')
+
+      // The half-joined file rides the same seam as a stream upload's buffered chunk, so the
+      // SIGINT handler removes it on the way out rather than leaving it for someone to find.
+      await runJoin(parsed.args[0], parsed.options, {
+        onTempChunk: (file) => {
+          tempChunk = file
+        },
+      })
       return
     }
 

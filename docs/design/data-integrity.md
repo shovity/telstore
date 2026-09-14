@@ -286,6 +286,22 @@
   a lock is not held by a machine that lost power), and telstore would be deciding on its own
   to delete a file. If a sweep is ever wanted, this is the door to it.
 
+- **`join` is `runRestore` with the chat replaced by a folder, and it keeps every check that
+  does not depend on the chat.** The manifest goes through the full `parseManifest`, since
+  bytes are written at offsets computed from its layout exactly as a restore writes them. The
+  message ids are never read, so a manifest whose ids are wrong or absent still joins — the
+  sha256 of each chunk is what proves the bytes, and nothing about the chat ever did. Three
+  things differ from restore, each on purpose. It stats every chunk before writing a byte and
+  names every missing or wrong-sized file in one error, because a download by hand that missed
+  three files should cost one more trip to the chat, not three. It writes `<target>.joining`,
+  not `.partial`: `.partial` belongs to restore, which resumes from it, and a join aimed at the
+  same target would otherwise truncate a half-finished download without asking. And it removes
+  that file on every failure rather than keeping it for inspection or a resume — the source
+  chunks are still on disk, so a half-joined file is only a place a wrong file could be picked
+  up from. The backup id becomes part of each chunk's path, so an id carrying a separator or a
+  leading dot is refused rather than followed out of the manifest's folder. Ctrl-C reaches the
+  temp file through the same `onTempChunk` seam a stream upload uses, so `bin/telstore.js`
+  unlinks it on the way out.
 - `verify` exists because nothing else answers "is this backup still restorable" without
   downloading it. It asks the chat about every chunk message the manifest names — still
   there, still a document, still the file name telstore wrote, still the length recorded —

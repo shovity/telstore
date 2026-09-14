@@ -611,3 +611,26 @@ test('--out is refused for a restore into a command, which writes no file', () =
 test('the message for a subcommand that cannot take a command names both that can', () => {
   assert.throws(() => route(['list', '--', 'tar', 'xf', '-']), /npx telstore restore/)
 })
+
+test('join takes the path of one manifest', () => {
+  const r = route(['join', './dl/telstore-1.manifest.json', '--out', 'x.tar'])
+  assert.equal(r.command, 'join')
+  assert.deepEqual(r.args, ['./dl/telstore-1.manifest.json'])
+  assert.equal(r.options.out, 'x.tar')
+})
+
+// --out names one file, so a second manifest has no answer to where it goes.
+test('join refuses no manifest and more than one', () => {
+  assert.throws(() => route(['join']), /Missing the manifest/)
+  assert.throws(() => route(['join', 'a.manifest.json', 'b.manifest.json']), /one manifest/)
+})
+
+test('join takes no command after --', () => {
+  assert.throws(() => route(['join', 'a.manifest.json', '--', 'tar', 'xf', '-']), /takes no command/)
+})
+
+test('Ctrl-C during a join says nothing was joined and how to start over', () => {
+  const message = interruptMessage('join')
+  assert.match(message, /Nothing was joined/)
+  assert.match(message, /again/)
+})

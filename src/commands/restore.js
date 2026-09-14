@@ -12,7 +12,7 @@ import { configFile, defaultConfigDir, loadConfig } from '../config.js'
 import { assertLoggedIn } from '../session.js'
 import { requireChat, resolveSettings } from '../settings.js'
 import { downloadToFile, hashRange } from '../downloader.js'
-import { parseManifest } from '../manifest.js'
+import { parseManifest, safeOutName } from '../manifest.js'
 import { createProgress, formatBytes, formatDuration } from '../progress.js'
 import { clearRestore, pruneRestores, restoreKey, saveRestore } from '../state.js'
 
@@ -57,23 +57,6 @@ export async function realGetMessage(client, peer, msgId) {
 
 export async function realDownloadChunk(client, message, handle, offset, onProgress, options) {
   return await downloadToFile(client, message, handle.fd, { offset, onProgress, ...options })
-}
-
-// manifest.name comes from data downloaded off Telegram — don't trust it when picking
-// a path ourselves. path.basename stops "../../x" but still returns "..", "." or "" for
-// a few pathological names: path.resolve('..') is the parent directory, so a multi-GB
-// .partial file would land outside the current directory and only blow up at rename.
-function safeOutName(name) {
-  const base = path.basename(String(name ?? ''))
-
-  if (base === '' || base === '.' || base === '..') {
-    throw new Error(
-      `The name in the manifest ("${name}") cannot be used as a file name. ` +
-        'Run again with --out <path> to choose where to write.',
-    )
-  }
-
-  return base
 }
 
 // How many chunks at the front of a .partial already hold what the manifest says they

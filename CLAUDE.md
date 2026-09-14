@@ -55,6 +55,7 @@ anything that row names** — not afterwards, and not only when something looks 
 | `src/manifest.js`, `src/state.js`, `src/chunking.js`, `src/config.js` | `docs/design/data-integrity.md` |
 | `src/commands/restore.js`, the resume scan | `docs/design/data-integrity.md` |
 | `src/commands/verify.js` | `docs/design/data-integrity.md` |
+| `src/commands/join.js` | `docs/design/data-integrity.md` |
 | `src/commands/upload-stream.js`, `src/stream.js`, the stream rollback | `docs/design/data-integrity.md`, `docs/design/module-boundaries.md` |
 | `src/commands/restore-stream.js`, the restore rollback-free path | `docs/design/data-integrity.md` |
 | `src/commands/status.js`, `src/shell.js`, any command telstore prints to be pasted | `docs/design/data-integrity.md` |

@@ -37,6 +37,7 @@ npx telstore restore telstore-20260905-7f3a91
 | `telstore restore <backup-id> -- <command>...` | Restore onto the command's stdin instead of a file. |
 | `telstore verify <backup-id>...` | Check that every chunk of a backup is still in the chat. Downloads nothing. |
 | `telstore delete <backup-id>...` | Remove a backup's chunks and manifest from the chat, for good. Several ids are listed and confirmed once. |
+| `telstore join <manifest.json>` | Reassemble chunks you downloaded by hand. Offline: no login, no connection. |
 | `telstore status` | Account, destination, and unfinished uploads and restores. |
 | `telstore config` | Show or change settings. |
 | `telstore token` | Print a session token for a machine you do not trust. |
@@ -209,6 +210,26 @@ Chunk 3/12 is gone: message 1042 is no longer in @my_backups.
 
 12 chunks checked, 1 damaged. This backup cannot be restored.
 ```
+
+## Joining chunks downloaded by hand
+
+A backup is ordinary files in a chat, so it can be fetched without telstore — from Telegram
+web, on a machine where you cannot or would rather not log in. Download the manifest
+(`<backupId>.manifest.json`) and every chunk (`<backupId>.part0001`, `.part0002`, …) into one
+folder, keeping the names they have in the chat, then:
+
+```bash
+npx telstore join ~/Downloads/telstore-20260905-7f3a91.manifest.json
+npx telstore join ~/Downloads/telstore-20260905-7f3a91.manifest.json --out data.tar
+```
+
+`join` makes the same promise `restore` does, from the manifest rather than the chat: every
+chunk is checked for its length before anything is written, every missing or short one is
+named in one go, each chunk's sha256 is checked as it is copied, and the file takes its real
+name only after all of it passes. Until then it is `<target>.joining`, which a failure or a
+Ctrl-C removes — the chunks are still in the folder, so there is nothing worth keeping. A
+browser that saves a name twice tends to add ` (1)` to it; `join` does not guess past that,
+so rename the file back.
 
 ## Several backups at once
 

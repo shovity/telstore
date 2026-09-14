@@ -23,6 +23,7 @@ const SUBCOMMANDS = new Set([
   'restore',
   'verify',
   'delete',
+  'join',
   'status',
   'config',
   'token',
@@ -60,6 +61,7 @@ Usage:
   npx telstore restore <backup-id>...     Download the chunks and reassemble the files
   npx telstore verify <backup-id>...      Check that a backup's chunks are all still in the chat
   npx telstore delete <backup-id>...      Remove backups' chunks and manifests from the chat
+  npx telstore join <manifest.json>       Reassemble chunks you downloaded by hand, offline
   npx telstore status                     Show the account, the destination and unfinished uploads and restores
   npx telstore config                     Show every setting and where its value comes from
   npx telstore logout                     Remove the saved session
@@ -106,6 +108,11 @@ an exit code that reports any that failed. delete shows everything it is about t
 asks once. verify downloads nothing: it asks the chat whether every chunk message is still
 there at the length the manifest records, which is what restore would need.
 
+join is restore without Telegram, for chunks you downloaded yourself — from Telegram web, say.
+Put the manifest and every <id>.partNNNN file in one folder under the names they have in the
+chat, and point join at the manifest. It needs no login and opens no connection, and it checks
+each chunk's size and sha256 against the manifest before the file takes its real name.
+
 Settings:
   npx telstore config <name>              Print one setting's value
   npx telstore config <name> <value>      Change it for good
@@ -124,8 +131,8 @@ Options apply to one run and are never saved. Use config to change a setting for
                               size it started with.
   --upload-concurrency <n>    512KB parts in parallel while uploading, this run only.
   --download-concurrency <n>  8MB slices in parallel while restoring, this run only.
-  --out <path>                Where to write the restored file. Defaults to the basename in
-                              the manifest, and works with one backup id only.
+  --out <path>                Where to write the restored or joined file. Defaults to the
+                              basename in the manifest, and works with one backup id only.
   --note <text>               A note to store with the upload. It goes into the manifest and
                               onto the manifest message, where Telegram's own search can find
                               it, and every file of a batch gets the same one. A note with
@@ -269,6 +276,13 @@ export function interruptMessage(
       '\nStopped. Some chunk messages are already gone — run the same command again to ' +
       'finish removing the backup.\n'
     )
+  }
+
+  // A join writes nothing under the real name until the end, and the half-joined file is
+  // removed on the way out, so there is nothing to carry on from — and nothing in the chat
+  // it could have touched.
+  if (command === 'join') {
+    return '\nStopped. Nothing was joined — run the same command again to start over.\n'
   }
 
   return '\nStopped.\n'
@@ -513,6 +527,22 @@ export function route(argv) {
 
   const shortcut = SHORTCUTS.get(first)
   if (shortcut) return shortcut(rest, values, filesAfterNote)
+
+  // --out names one file, and each manifest is one file: a second manifest on the line would
+  // have to be written somewhere nobody said.
+  if (first === 'join') {
+    if (rest.length === 0) {
+      throw new Error(
+        'Missing the manifest to join. Example: npx telstore join ./telstore-20260905-7f3a91.manifest.json',
+      )
+    }
+
+    if (rest.length > 1) {
+      throw new Error(
+        `join takes one manifest and got ${rest.length}: ${rest.join(', ')}. Run it once per backup.`,
+      )
+    }
+  }
 
   if (SUBCOMMANDS.has(first)) {
     return { command: first, args: rest, options: values, filesAfterNote, childArgv, shortcut: null }
