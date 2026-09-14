@@ -9,7 +9,9 @@ import {
   readMessageBytes as realReadMessageBytes,
 } from '../client.js'
 import { configFile, defaultConfigDir, loadConfig } from '../config.js'
-import { parseManifest } from '../manifest.js'
+import { chunkCipher, decryptInPlace } from '../cipher.js'
+import { isEncrypted, parseManifest } from '../manifest.js'
+import { askPassword as realAskPassword, unlockManifest } from '../password.js'
 import { createProgress, formatBytes, plural } from '../progress.js'
 import { assertLoggedIn } from '../session.js'
 import { requireChat, resolveSettings } from '../settings.js'
@@ -50,6 +52,8 @@ export async function runRestoreStream(backupId, childArgv, options = {}, deps =
     // tarx only. The alias promises gzip, so it checks the claim before spending a gigabyte
     // finding out; `restore <id> -- tar xf -` promises nothing and is asked nothing.
     requireGzipName = false,
+    askPassword = realAskPassword,
+    interactive = () => Boolean(process.stdin.isTTY),
   } = deps
 
   const config = await loadConfig(configDir)
@@ -109,8 +113,16 @@ export async function runRestoreStream(backupId, childArgv, options = {}, deps =
       )
     }
 
+    // Before the command is started, for the reason the gzip check above runs before the
+    // download: a restore that cannot be decrypted should cost nothing, and a command started
+    // for it would be a tar waiting on a pipe that is never going to carry anything.
+    const opened = isEncrypted(manifest)
+      ? await unlockManifest(manifest, { askPassword, interactive, say: log })
+      : null
+
     log(`Backup ${backupId}`)
     log(`Name   ${manifest.name} (${plural(manifest.chunks.length, 'chunk')}, ${formatBytes(manifest.size)})`)
+    if (opened) log('Lock   encrypted')
     log(`From   ${describeChat(chat)}`)
     log(`Into   ${childArgv.join(' ')}\n`)
 
@@ -238,6 +250,21 @@ export async function runRestoreStream(backupId, childArgv, options = {}, deps =
               `Chunk ${chunk.i + 1} has a sha256 that does not match the manifest. ` +
                 `${received(childArgv, written)}`,
             )
+          }
+
+          // The rule this file keeps — no byte reaches the command before its chunk is verified —
+          // now means verified as plaintext: decrypted in the temp file, hashed against the seal,
+          // and only then pumped.
+          if (opened) {
+            const clear = await decryptInPlace(handle, 0, size, chunkCipher(opened.keys.chunkKey, chunk.iv))
+
+            if (clear !== opened.plainSha256[chunk.i]) {
+              throw new Error(
+                `Chunk ${chunk.i + 1} matched its encrypted sha256 but decrypted to bytes that do ` +
+                  'not match the manifest. That points at telstore rather than at the backup. ' +
+                  `${received(childArgv, written)}`,
+              )
+            }
           }
 
           // Only now, and this line is the guarantee: everything above it is what makes the

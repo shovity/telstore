@@ -1,16 +1,16 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { PassThrough } from 'node:stream'
 
 import { runRestoreStream } from '../src/commands/restore-stream.js'
 import { saveConfig } from '../src/config.js'
-import { buildManifest, manifestFileName, serializeManifest } from '../src/manifest.js'
+import { buildManifest, chunkFileName, manifestFileName, serializeManifest } from '../src/manifest.js'
 import { tempDirFor } from '../src/state.js'
 
-import { LOGGED_IN, collect, tempDir } from './helpers.js'
+import { LOGGED_IN, collect, encryptedBackup, passwordDeps, tempDir } from './helpers.js'
 
 const ARGV = ['tar', 'xzf', '-']
 
@@ -604,4 +604,36 @@ test('the command it is feeding is printed, and so is the name it is feeding it'
   assert.match(out.text(), new RegExp(backup.id))
   assert.match(out.text(), /data\.tar\.gz/)
   assert.match(out.text(), /tar xzf -/)
+})
+
+async function encryptedChat(content) {
+  const { manifest, pieces } = await encryptedBackup({ name: 'data.tar.gz', content, chunkSize: 4 })
+  const manifestBytes = serializeManifest(manifest)
+  const messages = [
+    ...pieces.map((piece) => ({ id: piece.msgId, fileName: chunkFileName(manifest.id, piece.i), bytes: piece.bytes })),
+    { id: 2000, fileName: manifestFileName(manifest.id), bytes: manifestBytes },
+  ]
+
+  return { id: manifest.id, content, messages, manifest, manifestBytes }
+}
+
+test('an encrypted backup reaches the command as plaintext', async () => {
+  const ws = await workspace()
+  const backup = await encryptedChat(randomBytes(10))
+  const child = fakeChild()
+  const { deps } = fakeChat(backup, child, ws, passwordDeps())
+
+  await runRestoreStream(backup.id, ARGV, {}, deps)
+
+  assert.deepEqual(child.bytes(), backup.content)
+})
+
+test('an encrypted backup with no terminal for its password starts no command', async () => {
+  const ws = await workspace()
+  const backup = await encryptedChat(randomBytes(10))
+  const child = fakeChild()
+  const { deps, spawn } = fakeChat(backup, child, ws, { ...passwordDeps(), interactive: () => false })
+
+  await assert.rejects(() => runRestoreStream(backup.id, ARGV, {}, deps), /no terminal/)
+  assert.equal(spawn.calls.length, 0)
 })
