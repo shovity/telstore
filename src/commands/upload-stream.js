@@ -3,7 +3,7 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 
 import { MAX_CHUNKS, PART_SIZE } from '../chunking.js'
-import { chunkCaption, manifestCaption, parseNote } from '../caption.js'
+import { chunkCaption, manifestCaption, parseNote, terminalSafe } from '../caption.js'
 import { chatName, describeChat } from '../chat.js'
 import { chunkCipher, deriveKeys, newIv, newSalt, sealManifest } from '../cipher.js'
 import {
@@ -229,7 +229,7 @@ export async function runStreamUpload(name, childArgv, options = {}, deps = {}) 
 
   log(`Backup ${id}`)
   log(`Name   ${name} (chunks of ${formatBytes(chunkSize)})`)
-  if (enc) log(`Lock   encrypted${enc.hint ? ` (hint: ${enc.hint})` : ''}`)
+  if (enc) log(`Lock   encrypted${enc.hint ? ` (hint: ${terminalSafe(enc.hint)})` : ''}`)
   log(`From   ${childArgv.join(' ')}`)
   log(`To     ${describeChat(chat)}\n`)
 

@@ -1346,6 +1346,41 @@ test('an encrypted record filed under the plain key is refused as damaged, with 
   }
 })
 
+// The record's hint goes into the manifest, and parseManifest refuses one carrying a control
+// character. Resumed as it is, that would be a backup that uploads cleanly and never restores.
+test('a resumed encrypted record whose hint carries a control character is refused as damaged', async () => {
+  const ws = await tempWorkspace(1000)
+
+  await assert.rejects(() =>
+    runUpload(
+      ws.filePath,
+      { chat: '@store', 'chunk-size': '400', encrypt: true },
+      encryptedRun(fakeClient({ failOnChunk: 1 }), ws, passwordDeps({ hint: 'the cat' })),
+    ),
+  )
+
+  const stat = await fs.stat(ws.filePath)
+  const key = encryptedStateKey(ws.filePath, stat.size, stat.mtimeMs)
+  const state = await loadState(key, ws.configDir)
+  await saveState(key, { ...state, enc: { ...state.enc, hint: 'the\x1b[2J cat' } }, ws.configDir)
+
+  const client = fakeClient()
+  const asked = []
+
+  await assert.rejects(
+    () =>
+      runUpload(
+        ws.filePath,
+        { chat: '@store', 'chunk-size': '400', encrypt: true },
+        encryptedRun(client, ws, passwordDeps({ asked })),
+      ),
+    /does not carry what is needed to carry on encrypting it/,
+  )
+
+  assert.deepEqual(asked, [])
+  assert.equal(client.messages.length, 0)
+})
+
 test('a plain record filed under the encrypted key is refused as damaged', async () => {
   const ws = await tempWorkspace(1000)
 

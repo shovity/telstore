@@ -74,8 +74,9 @@ export function chunkCipher(chunkKey, iv) {
 
 // Built from the fields, in one fixed order, and never by serializing the parsed object again:
 // an array has one serialization, while an object's depends on the key order of a file a person
-// can edit. Every field is covered, the readable ones included — a hint changed by someone else
-// is a line of their choosing printed by telstore.
+// can edit. Every field is covered, the readable ones included. That proves the hint genuine only
+// once a password opens the seal, and it is printed before then, so it is also made safe to print
+// (terminalSafe in src/caption.js) rather than trusted because of this.
 export function additionalData(manifest) {
   return Buffer.from(
     JSON.stringify([

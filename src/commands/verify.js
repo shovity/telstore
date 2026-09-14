@@ -1,3 +1,4 @@
+import { terminalSafe } from '../caption.js'
 import { chatName, describeChat } from '../chat.js'
 import {
   MESSAGE_BATCH_SIZE,
@@ -135,7 +136,7 @@ export async function runVerify(backupId, options = {}, deps = {}) {
     // Said, not checked: verify never has the password and never needs it. What it asks the chat
     // about — presence, file name, length — is the same for ciphertext.
     if (isEncrypted(manifest)) {
-      log(`Lock   encrypted${manifest.enc.hint ? ` (hint: ${manifest.enc.hint})` : ''}`)
+      log(`Lock   encrypted${manifest.enc.hint ? ` (hint: ${terminalSafe(manifest.enc.hint)})` : ''}`)
     }
     log('')
 

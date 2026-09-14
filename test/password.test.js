@@ -110,6 +110,44 @@ test('a wrong password is asked again, and three wrong ones stop', async () => {
   assert.equal(asked, 3)
 })
 
+// parseManifest would refuse this hint before unlock ever saw it; handing it over directly is
+// what exercises the printing itself, which must not trust the manifest to have been parsed.
+test('unlock prints the hint only once it is safe for a terminal', async () => {
+  const { manifest } = await fixture('the\x1b[2J cat')
+  const said = []
+
+  await unlockManifest(manifest, {
+    askPassword: async () => PASSWORD,
+    interactive: () => true,
+    say: (line) => said.push(line),
+  })
+
+  assert.ok(said.includes('Hint   the[2J cat'))
+  assert.equal(said.some((line) => line.includes('\x1b')), false)
+})
+
+test('the last refusal says a hint that did not help may itself have been altered', async () => {
+  const { manifest } = await fixture()
+
+  await assert.rejects(
+    () => unlockManifest(manifest, { askPassword: async () => 'wrong', interactive: () => true }),
+    /The hint shown comes from the chat and is only checked once the password opens the backup, so a hint that does not help may itself have been altered/,
+  )
+})
+
+test('with no hint shown, the last refusal does not mention one', async () => {
+  const { manifest } = await fixture(null)
+
+  await assert.rejects(
+    () => unlockManifest(manifest, { askPassword: async () => 'wrong', interactive: () => true }),
+    (err) => {
+      assert.match(err.message, /either the password is wrong or the manifest was altered/)
+      assert.doesNotMatch(err.message, /hint/)
+      return true
+    },
+  )
+})
+
 test('a wrong password then the right one opens it', async () => {
   const { manifest } = await fixture()
   const answers = ['wrong', PASSWORD]

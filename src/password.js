@@ -1,6 +1,6 @@
 import { stderr, stdin } from 'node:process'
 
-import { parseHint } from './caption.js'
+import { parseHint, terminalSafe } from './caption.js'
 import { openManifest } from './cipher.js'
 import { createPrompts, readSecret } from './prompt.js'
 
@@ -70,7 +70,12 @@ export async function unlockManifest(
   }
 
   say(`Backup ${manifest.id} is encrypted.`)
-  if (manifest.enc.hint) say(`Hint   ${manifest.enc.hint}`)
+
+  // Printed before any key exists, so the seal that covers it cannot have been checked yet: at
+  // this moment it is as trustworthy as the chat it came from, and is made safe to print as such.
+  const hint = manifest.enc.hint ? terminalSafe(manifest.enc.hint) : ''
+
+  if (hint) say(`Hint   ${hint}`)
 
   for (let attempt = 1; attempt <= PASSWORD_ATTEMPTS; attempt += 1) {
     const password = await ask('Password: ')
@@ -87,6 +92,10 @@ export async function unlockManifest(
   throw new Error(
     `Could not open ${manifest.id} after ${PASSWORD_ATTEMPTS} attempts: either the password is ` +
       'wrong or the manifest was altered. Encryption cannot tell those two apart, so telstore ' +
-      'will not guess — check the password first.',
+      'will not guess — check the password first.' +
+      (hint
+        ? ' The hint shown comes from the chat and is only checked once the password opens the ' +
+          'backup, so a hint that does not help may itself have been altered.'
+        : ''),
   )
 }

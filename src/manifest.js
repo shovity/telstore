@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import path from 'node:path'
 
+import { MAX_HINT_LENGTH, hasControlCharacter } from './caption.js'
 import { countChunks } from './chunking.js'
 
 export const MANIFEST_VERSION = 1
@@ -206,6 +207,23 @@ function checkEncryption(manifest) {
 
   if (enc.hint !== undefined && typeof enc.hint !== 'string') {
     throw new Error(`Manifest records a hint of ${JSON.stringify(enc.hint)}, which is not text.`)
+  }
+
+  // The hint is printed above the password prompt before the seal can be checked, so it is the one
+  // field here a stranger's edit reaches a terminal through. telstore never writes one longer than
+  // the card allows or one carrying a control character, so either is an edit, and refused.
+  if (typeof enc.hint === 'string' && enc.hint.length > MAX_HINT_LENGTH) {
+    throw new Error(
+      `Manifest records a hint of ${enc.hint.length} characters, and telstore never writes one ` +
+        `longer than ${MAX_HINT_LENGTH}.`,
+    )
+  }
+
+  if (typeof enc.hint === 'string' && hasControlCharacter(enc.hint)) {
+    throw new Error(
+      'Manifest records a hint carrying a control character, which telstore never writes and ' +
+        'which would reach the terminal as an instruction rather than as text.',
+    )
   }
 
   if (typeof enc.sealed !== 'string' || enc.sealed === '') {

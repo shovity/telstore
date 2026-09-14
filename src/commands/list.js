@@ -1,4 +1,4 @@
-import { parseManifestCaption } from '../caption.js'
+import { parseManifestCaption, terminalSafe } from '../caption.js'
 import { chatName, describeChat } from '../chat.js'
 import {
   closeQuietly,
@@ -109,8 +109,9 @@ function toRow(message) {
     chunks: String(card.chunks),
     created: card.createdAt.slice(0, 10),
     note: card.note ? shorten(card.note) : UNKNOWN,
-    // The hint is here because this is where someone who forgot a password looks first.
-    lock: card.encrypted ? (card.hint ? `🔒 ${shorten(card.hint)}` : '🔒') : UNKNOWN,
+    // The hint is here because this is where someone who forgot a password looks first. It comes
+    // off a caption anyone in the chat can edit, so it is made safe to print before it is printed.
+    lock: card.encrypted ? (card.hint ? `🔒 ${shorten(terminalSafe(card.hint))}` : '🔒') : UNKNOWN,
   }
 }
 

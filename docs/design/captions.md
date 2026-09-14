@@ -208,5 +208,8 @@
   the note and the restore line. Both are optional markers, like the note, so every older card
   still parses. `list` shows a `LOCK` column only when some row is encrypted — the `NOTE` rule —
   with the hint shortened to 40 characters, because that is where someone who forgot a password
-  looks first. The hint `restore` prints above its prompt comes from the manifest, which is
-  authenticated, never from the caption, which is not.
+  looks first. The hint `restore` prints above its prompt comes from the manifest, never from the
+  caption. The manifest's hint is covered by the seal, but the seal proves it genuine only after
+  the password opens it; when it is printed, before that, it is as trustworthy as the chat — which
+  is why every hint, the manifest's and the caption's alike, goes through `terminalSafe` (control
+  characters dropped, whitespace folded) before it reaches a terminal.

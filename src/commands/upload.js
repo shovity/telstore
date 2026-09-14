@@ -6,7 +6,14 @@ import { Api } from 'teleproto'
 import { CustomFile } from 'teleproto/client/uploads.js'
 
 import { PART_SIZE, planChunks } from '../chunking.js'
-import { chunkCaption, manifestCaption, parseNote } from '../caption.js'
+import {
+  MAX_HINT_LENGTH,
+  chunkCaption,
+  hasControlCharacter,
+  manifestCaption,
+  parseNote,
+  terminalSafe,
+} from '../caption.js'
 import { chunkCipher, deriveKeys, newIv, newSalt, passwordCheck, sealManifest } from '../cipher.js'
 import { describeChat } from '../chat.js'
 import { closeQuietly, connect as realConnect } from '../client.js'
@@ -315,7 +322,14 @@ export async function runUpload(filePath, options = {}, deps = {}) {
     if (
       typeof state.enc?.salt !== 'string' ||
       !/^[0-9a-f]{32}$/.test(state.enc.salt) ||
-      typeof state.enc.check !== 'string'
+      typeof state.enc.check !== 'string' ||
+      // The record's hint goes into the manifest, and parseManifest refuses one that is not text,
+      // too long, or carrying a control character. Caught here it is a damaged record; caught at
+      // restore it would be a backup that uploaded cleanly and can never be restored.
+      (state.enc.hint !== undefined &&
+        (typeof state.enc.hint !== 'string' ||
+          state.enc.hint.length > MAX_HINT_LENGTH ||
+          hasControlCharacter(state.enc.hint)))
     ) {
       throw new Error(
         'The record of this unfinished backup says it is encrypted but does not carry what is ' +
@@ -330,7 +344,7 @@ export async function runUpload(filePath, options = {}, deps = {}) {
     // into a single backup.
     const password =
       secret?.password ??
-      (await askPassword(`Password for ${state.id}${state.enc.hint ? ` (hint: ${state.enc.hint})` : ''}: `))
+      (await askPassword(`Password for ${state.id}${state.enc.hint ? ` (hint: ${terminalSafe(state.enc.hint)})` : ''}: `))
 
     keys = await deriveKeys(password, state.enc.salt)
 
@@ -388,7 +402,7 @@ export async function runUpload(filePath, options = {}, deps = {}) {
 
   log(`Backup ${state.id}`)
   log(`File   ${absPath} (${formatBytes(stat.size)}, ${chunks.length} chunks)`)
-  if (enc) log(`Lock   encrypted${enc.hint ? ` (hint: ${enc.hint})` : ''}`)
+  if (enc) log(`Lock   encrypted${enc.hint ? ` (hint: ${terminalSafe(enc.hint)})` : ''}`)
   log(`To     ${describeChat(chat)}\n`)
 
   const client = await connect(config, { verbose: settings.verbose })

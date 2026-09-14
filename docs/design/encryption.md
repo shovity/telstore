@@ -32,8 +32,17 @@
   bytes. An older `delete` still works, through the lenient `parseManifestJson`.
 - **The additional data is built from the fields in one fixed order, never by re-serializing the
   parsed object**, whose key order belongs to a file a person can edit. The readable fields —
-  name, note, hint — are covered too: not secret, but a hint changed by someone else is a line of
-  their choosing that telstore prints above a password prompt.
+  name, note, hint — are covered too: not secret, but not to be altered either.
+- **The seal proves the hint genuine only after the password opens it; before that the hint is
+  as trustworthy as the chat.** And before is exactly when it is printed — `Hint   …` sits above
+  the password prompt, before any key exists — so the seal cannot stop a tampered hint from being
+  shown. What does: `parseManifest` refuses a hint longer than `MAX_HINT_LENGTH` or carrying a
+  control character (telstore never writes either; `parseHint` strips them at upload time), and
+  every place a hint reaches a terminal — restore's unlock, a resumed upload's prompt, `verify`'s
+  `Lock` line, `list`'s `LOCK` column from the caption — passes it through `terminalSafe`, which
+  drops C0 and C1 controls and folds whitespace. The worst a stranger's hint can then do is say
+  something unhelpful, so the last refusal after three wrong passwords says that a hint which did
+  not help may itself have been altered.
 - **Passwords come from a terminal only**, the rule `token` keeps. A resumed upload asks again
   and compares an HMAC check kept in the record; neither the password nor a key touches disk.
 - **An unfinished encrypted upload's record is filed under `encryptedStateKey`, not `stateKey`,

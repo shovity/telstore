@@ -9,6 +9,8 @@ import {
   parseManifestCaption,
   parseNote,
   parseHint,
+  hasControlCharacter,
+  terminalSafe,
 } from '../src/caption.js'
 
 test('a chunk caption names the backup and its position in the set', () => {
@@ -266,6 +268,34 @@ test('a hint is folded onto one line, and an empty one is no hint', () => {
 
 test('a hint longer than the card has room for is refused, not cut', () => {
   assert.throws(() => parseHint('h'.repeat(MAX_HINT_LENGTH + 1)), /room for 100/)
+})
+
+// A hint is printed before the seal over it can be checked, so what reaches the terminal must
+// be text and nothing else: an escape sequence from a tampered manifest could clear the screen
+// around the password prompt.
+test('terminalSafe drops C0 and C1 control characters and folds whitespace', () => {
+  assert.equal(terminalSafe('the\x1b[2J cat'), 'the[2J cat')
+  assert.equal(terminalSafe('a\x00b\x07c\x7fd\x9be\x85f'), 'abcdef')
+  assert.equal(terminalSafe('  the\t\n cat\r  '), 'the cat')
+  assert.equal(terminalSafe('the cat'), 'the cat')
+  assert.equal(hasControlCharacter(terminalSafe('\x1b\x9b\x00\x1f\x7f\x80\x9f x')), false)
+})
+
+test('hasControlCharacter finds C0, DEL and C1, and nothing else', () => {
+  for (const c of ['\x00', '\x1b', '\x1f', '\x7f', '\x80', '\x9f', '\n', '\t']) {
+    assert.equal(hasControlCharacter(`a${c}b`), true, JSON.stringify(c))
+  }
+
+  assert.equal(hasControlCharacter('the cat · 💡 é'), false)
+})
+
+// parseManifest refuses a hint carrying a control character, so one typed at upload time has to
+// lose it here — otherwise an honest backup would be one restore turns away.
+test('a hint typed with a control character in it loses the character', () => {
+  const hint = parseHint('the\x1b[2J cat\x07')
+
+  assert.equal(hint, 'the[2J cat')
+  assert.equal(hasControlCharacter(hint), false)
 })
 
 test('a hint that contains the password is refused', () => {

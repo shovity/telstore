@@ -418,10 +418,31 @@ const BROKEN_V2 = {
   'no enc at all': (m) => { delete m.enc },
   'a salt that is not 32 hex characters': (m) => { m.enc.salt = 'abc' },
   'a hint that is not text': (m) => { m.enc.hint = 42 },
+  'a hint longer than telstore writes': (m) => { m.enc.hint = 'h'.repeat(101) },
+  'a hint carrying a control character': (m) => { m.enc.hint = 'the\x1b[2J cat' },
   'no sealed part': (m) => { delete m.enc.sealed },
   'a chunk without an iv': (m) => { delete m.chunks[1].iv },
   'an iv that is not 16 hex characters': (m) => { m.chunks[0].iv = 'xyz' },
 }
+
+// The hint is printed above the password prompt before the seal can be checked, so a stranger's
+// edit to it is refused by shape, here, before it can reach a terminal at all.
+test('a tampered hint carrying an escape sequence is refused for the control character', () => {
+  const manifest = structuredClone(sealedLooking(buildManifest(encryptedFields())))
+  manifest.enc.hint = '\x1b[2J'
+
+  assert.throws(() => parseManifest(JSON.stringify(manifest)), /hint carrying a control character/)
+})
+
+test('a hint over 100 characters is refused, and one of exactly 100 is read', () => {
+  const long = structuredClone(sealedLooking(buildManifest(encryptedFields())))
+  long.enc.hint = 'h'.repeat(101)
+  assert.throws(() => parseManifest(JSON.stringify(long)), /hint of 101 characters/)
+
+  const longest = structuredClone(sealedLooking(buildManifest(encryptedFields())))
+  longest.enc.hint = 'h'.repeat(100)
+  assert.equal(parseManifest(JSON.stringify(longest)).enc.hint, 'h'.repeat(100))
+})
 
 for (const [what, breakIt] of Object.entries(BROKEN_V2)) {
   test(`a version 2 manifest with ${what} is refused`, () => {

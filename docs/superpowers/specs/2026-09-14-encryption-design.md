@@ -136,8 +136,10 @@ An encrypted backup's manifest is `v: 2`. An unencrypted one stays `v: 1`, byte 
   salt, hint ?? null, chunks.map(c => [c.i, c.msgId, c.size, c.sha256, c.iv])])`. An array in a
   fixed order has one serialization; a re-serialized object depends on key order in a file a
   person can edit. Every field is covered, including the name, note and hint that stay
-  readable: they are not secret, but they must not be *altered* — a hint changed by someone
-  else is a phishing line printed by telstore.
+  readable: they are not secret, but they must not be *altered*. The seal proves the hint
+  genuine only after the password opens it; before that — which is when it is printed, above the
+  password prompt — it is as trustworthy as the chat, which is why it is stripped of control
+  characters before it is printed.
 - **Why the version goes up.** An older telstore checks `v` and nothing else it does not know.
   Given a `v: 1` manifest with an extra `enc` field it would download the ciphertext, match
   every sha256 (they are the ciphertext's), match the length (CTR preserves it), rename, and
@@ -147,7 +149,8 @@ An encrypted backup's manifest is `v: 2`. An unencrypted one stays `v: 1`, byte 
   message ids are plain.
 
 `parseManifest` accepts `v: 2` and checks its **structure** without a password — `enc` an
-object, `salt` 32 hex characters, `hint` a string or absent, `sealed` a string, every chunk an
+object, `salt` 32 hex characters, `hint` absent or a string of at most 100 characters with no
+control character in it, `sealed` a string, every chunk an
 `iv` of 16 hex characters — on top of every layout check it makes today. `verify` therefore
 works on an encrypted backup without asking for anything. Opening the seal is a separate step
 (`openManifest`) that only restore and join take.
@@ -192,7 +195,9 @@ Hint (optional, shown in the chat as plain text): the cat's name
 
 A file upload's state record gains `enc: { salt, check, hint }`, where
 `check = HMAC-SHA256(manifestKey, 'telstore v2 password check')`. Neither the password nor a key
-is written to disk. Each `done` entry also records `iv` and `plainSha256`.
+is written to disk. Each `done` entry also records `iv` and `plainSha256`. The record is filed
+under `encryptedStateKey` (sha1 of `enc:<path>:<size>:<mtime>`) rather than `stateKey`, so an
+older telstore — which never reads `enc` — cannot find it and finish the backup in plain.
 
 | unfinished record | this run | result |
 | --- | --- | --- |
@@ -218,7 +223,9 @@ Hint   the cat's name
 Password: ********
 ```
 
-- The hint shown is the manifest's (authenticated), never the caption's.
+- The hint shown is the manifest's, never the caption's. It is covered by the seal, which proves
+  it genuine only after the password opens it; before that it is as trustworthy as the chat, which
+  is why it is stripped of control characters before it is printed.
 - A wrong password is asked again, three attempts in all.
 - In a batch restore, passwords that opened an earlier backup in the same run are tried first,
   silently; the prompt appears only when none of them opens this one.

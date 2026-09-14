@@ -674,6 +674,33 @@ test('a LOCK column appears when a backup is encrypted, carrying its hint', asyn
   assert.match(out.text(), /🔒 the cat/)
 })
 
+// A caption is text anyone in the chat can edit, and nothing checks it: the hint in the LOCK
+// column must reach the terminal as text, never as an escape sequence.
+test('a hint in the LOCK column is stripped of control characters', async () => {
+  const configDir = await workspace()
+  const out = collect()
+  const createdAt = '2026-09-14T08:00:00.000Z'
+  const locked = {
+    id: 2001,
+    fileName: 'telstore-20260914-ab12cd.manifest.json',
+    caption: manifestCaption({
+      id: 'telstore-20260914-ab12cd',
+      name: 'secret.tar',
+      size: 1000,
+      chunks: 1,
+      createdAt,
+      encrypted: true,
+      hint: 'the\x1b[2J cat',
+    }),
+    date: Math.floor(Date.parse(createdAt) / 1000),
+  }
+
+  await runList({}, deps(configDir, [locked, DATA_TAR], out))
+
+  assert.match(out.text(), /🔒 the\[2J cat/)
+  assert.equal(out.text().includes('\x1b'), false)
+})
+
 test('no LOCK column when nothing is encrypted', async () => {
   const configDir = await workspace()
   const out = collect()
