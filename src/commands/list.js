@@ -22,6 +22,7 @@ const COLUMNS = [
   { header: 'CHUNKS', key: 'chunks', right: true },
   { header: 'CREATED', key: 'created' },
   { header: 'NOTE', key: 'note' },
+  { header: 'LOCK', key: 'lock' },
 ]
 
 // The table is read at a glance, and the note is the one field with no shape at all — 500
@@ -97,6 +98,7 @@ function toRow(message) {
       chunks: UNKNOWN,
       created: utcDay(message.date),
       note: UNKNOWN,
+      lock: UNKNOWN,
     }
   }
 
@@ -107,6 +109,8 @@ function toRow(message) {
     chunks: String(card.chunks),
     created: card.createdAt.slice(0, 10),
     note: card.note ? shorten(card.note) : UNKNOWN,
+    // The hint is here because this is where someone who forgot a password looks first.
+    lock: card.encrypted ? (card.hint ? `🔒 ${shorten(card.hint)}` : '🔒') : UNKNOWN,
   }
 }
 
@@ -150,10 +154,12 @@ function matchesTerm(message, term) {
 }
 
 function renderTable(rows) {
-  // Most people never write a note, and a column of dashes tells them nothing they did not
-  // already know while costing every other column the width it takes.
+  // Most people never write a note or encrypt, and a column of dashes tells them nothing they
+  // did not already know.
   const columns = COLUMNS.filter(
-    (column) => column.key !== 'note' || rows.some((row) => row.note !== UNKNOWN),
+    (column) =>
+      (column.key !== 'note' || rows.some((row) => row.note !== UNKNOWN)) &&
+      (column.key !== 'lock' || rows.some((row) => row.lock !== UNKNOWN)),
   )
 
   const widths = columns.map((column) =>

@@ -45,6 +45,39 @@ export function parseNote(raw) {
   return note
 }
 
+// What the card has left once every other line has had its share. Measured 2026-09-14: the
+// worst card telstore writes without encryption — a 255-character name, a 500-character note,
+// 10000 chunks — is 899 of Telegram's 1024 characters, and the lock and hint lines leave 108.
+export const MAX_HINT_LENGTH = 100
+
+const LOCK_LINE = '🔒 encrypted'
+
+// Written at the password prompt and shown in the open: on the card, in `list`, and above the
+// password prompt at restore time. So a hint holding the password is a password in the chat.
+export function parseHint(raw, password = null) {
+  if (raw === undefined || raw === null) return null
+
+  const hint = oneLine(raw)
+
+  if (hint === '') return null
+
+  if (hint.length > MAX_HINT_LENGTH) {
+    throw new Error(
+      `The hint is ${hint.length} characters, and the card in the chat has room for ` +
+        `${MAX_HINT_LENGTH}. Shorten it: telstore will not cut it short by itself.`,
+    )
+  }
+
+  if (password && hint.toLowerCase().includes(String(password).toLowerCase())) {
+    throw new Error(
+      'The hint contains the password itself, and the hint is shown in the chat as plain ' +
+        'text. Write something only you would connect with it.',
+    )
+  }
+
+  return hint
+}
+
 function utcMinutes(createdAt) {
   return `${new Date(createdAt).toISOString().slice(0, 16).replace('T', ' ')} UTC`
 }
@@ -58,7 +91,7 @@ export function chunkCaption({ id, number, total }) {
     : `📦 ${id} · ${number}/${total}`
 }
 
-export function manifestCaption({ id, name, size, chunks, createdAt, note = null }) {
+export function manifestCaption({ id, name, size, chunks, createdAt, note = null, encrypted = false, hint = null }) {
   return [
     `📄 ${oneLine(name)}`,
     `💾 ${formatBytes(size)} · ${chunks} chunk${chunks === 1 ? '' : 's'}`,
@@ -67,6 +100,10 @@ export function manifestCaption({ id, name, size, chunks, createdAt, note = null
     // Below the facts telstore knows, above the line that says how to get the file back:
     // the note is the one part of the card a person wrote, so it reads last of the four.
     ...(note ? [`📝 ${oneLine(note)}`] : []),
+    // Below the note and above the restore line: the lock is a fact about the backup a person
+    // needs before they try to restore it, and the hint is what they will need at the prompt.
+    ...(encrypted ? [LOCK_LINE] : []),
+    ...(encrypted && hint ? [`💡 ${oneLine(hint)}`] : []),
     '',
     `↩ npx telstore restore ${id}`,
     MANIFEST_TAG,
@@ -93,11 +130,16 @@ export function parseManifestCaption(text) {
   // one marker whose absence means "there is no note" rather than "this is not a card".
   const note = marker(lines, '📝')
 
+  // Both optional, like the note: every card telstore wrote before encryption existed is a
+  // complete card with neither.
+  const encrypted = lines.includes(LOCK_LINE)
+  const hint = marker(lines, '💡')
+
   if (!name || !totals || !id || !createdAt) return null
 
   const match = /^(.+) · (\d+) chunks?$/.exec(totals)
 
   if (!match) return null
 
-  return { id, name, size: match[1], chunks: Number(match[2]), createdAt, note }
+  return { id, name, size: match[1], chunks: Number(match[2]), createdAt, note, encrypted, hint }
 }

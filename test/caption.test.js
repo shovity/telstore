@@ -3,10 +3,12 @@ import assert from 'node:assert/strict'
 
 import {
   MAX_NOTE_LENGTH,
+  MAX_HINT_LENGTH,
   chunkCaption,
   manifestCaption,
   parseManifestCaption,
   parseNote,
+  parseHint,
 } from '../src/caption.js'
 
 test('a chunk caption names the backup and its position in the set', () => {
@@ -95,6 +97,8 @@ test('a manifest caption parses back into the fields it was built from', () => {
     chunks: 12,
     createdAt: '2026-09-05 16:40 UTC',
     note: null,
+    encrypted: false,
+    hint: null,
   })
 })
 
@@ -204,4 +208,67 @@ test('a card without a note parses with no note rather than as unknown', () => {
   })
 
   assert.equal(parseManifestCaption(built).note, null)
+})
+
+test('an encrypted card says so and carries the hint, and parses back', () => {
+  const caption = manifestCaption({
+    id: 'telstore-20260914-ab12cd',
+    name: 'data.tar',
+    size: 1000,
+    chunks: 1,
+    createdAt: '2026-09-14T08:00:00.000Z',
+    encrypted: true,
+    hint: 'the cat',
+  })
+
+  assert.match(caption, /\n🔒 encrypted\n💡 the cat\n/)
+
+  const card = parseManifestCaption(caption)
+  assert.equal(card.encrypted, true)
+  assert.equal(card.hint, 'the cat')
+})
+
+test('a plain card is unchanged and parses as not encrypted', () => {
+  const caption = manifestCaption({
+    id: 'telstore-20260914-ab12cd',
+    name: 'data.tar',
+    size: 1000,
+    chunks: 1,
+    createdAt: '2026-09-14T08:00:00.000Z',
+  })
+
+  assert.equal(caption.includes('🔒'), false)
+  assert.equal(parseManifestCaption(caption).encrypted, false)
+  assert.equal(parseManifestCaption(caption).hint, null)
+})
+
+// Telegram takes 1024 characters in a caption. This is the worst card telstore can write.
+test('the longest card with a lock and the longest hint still fits a caption', () => {
+  const caption = manifestCaption({
+    id: 'telstore-20260914-abcdef',
+    name: 'x'.repeat(255),
+    size: 19.9e12,
+    chunks: 10000,
+    createdAt: '2026-09-14T08:00:00.000Z',
+    note: 'n'.repeat(500),
+    encrypted: true,
+    hint: 'h'.repeat(MAX_HINT_LENGTH),
+  })
+
+  assert.ok(caption.length <= 1024, `${caption.length} characters`)
+})
+
+test('a hint is folded onto one line, and an empty one is no hint', () => {
+  assert.equal(parseHint('  the\n cat  '), 'the cat')
+  assert.equal(parseHint('   '), null)
+  assert.equal(parseHint(undefined), null)
+})
+
+test('a hint longer than the card has room for is refused, not cut', () => {
+  assert.throws(() => parseHint('h'.repeat(MAX_HINT_LENGTH + 1)), /room for 100/)
+})
+
+test('a hint that contains the password is refused', () => {
+  assert.throws(() => parseHint('it is Hunter2 obviously', 'hunter2'), /contains the password/)
+  assert.equal(parseHint('my cat', 'hunter2'), 'my cat')
 })
