@@ -179,9 +179,11 @@ Hint (optional, shown in the chat as plain text): the cat's name
 - One `createPrompts` for the whole exchange, as `docs/design/terminal-prompts.md` requires,
   writing to stderr so stdout stays clean.
 - Mismatched passwords: an error, run again. Empty password: refused.
-- The hint is folded onto one line the way `parseNote` folds a note, capped at 200 characters,
+- The hint is folded onto one line the way `parseNote` folds a note, capped at 100 characters,
   and refused if it contains the password (case-insensitive) — a hint that *is* the password
-  is a plaintext password in the chat.
+  is a plaintext password in the chat. 100 is what the caption has left: measured 2026-09-14,
+  the worst card telstore writes today (a 255-character name, a 500-character note, 10000
+  chunks) is 899 of Telegram's 1024 characters, and the `🔒 encrypted` and `💡 ` lines leave 108.
 - No TTY: refused before anything else, naming `--encrypt`.
 - A batch asks once. Every file still gets its own salt, so each pays one scrypt (~64MB, a
   fraction of a second).
@@ -266,8 +268,9 @@ used before all three pass.
 
 ### Verify, delete
 
-`verify` is unchanged apart from one line in its header, `Encrypted  yes`. `delete` is
-unchanged.
+`verify` is unchanged apart from one line in its header, `Lock   encrypted` (with the hint
+when there is one), aligned with the `Backup`/`File`/`In` labels above it. Upload, restore and
+join print the same line in their own headers. `delete` is unchanged.
 
 ### Caption and `list`
 
