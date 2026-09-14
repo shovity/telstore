@@ -7,6 +7,7 @@ import { PassThrough } from 'node:stream'
 
 import { runRestoreStream } from '../src/commands/restore-stream.js'
 import { saveConfig } from '../src/config.js'
+import { sealManifest } from '../src/cipher.js'
 import { buildManifest, chunkFileName, manifestFileName, serializeManifest } from '../src/manifest.js'
 import { tempDirFor } from '../src/state.js'
 
@@ -636,4 +637,45 @@ test('an encrypted backup with no terminal for its password starts no command', 
 
   await assert.rejects(() => runRestoreStream(backup.id, ARGV, {}, deps), /no terminal/)
   assert.equal(spawn.calls.length, 0)
+})
+
+test('a chunk that decrypts to bytes not matching its plaintext seal is refused, and reaches the command not at all', async () => {
+  const ws = await workspace()
+  const content = randomBytes(10)
+  const { manifest, pieces, keys, plainSha256 } = await encryptedBackup({
+    name: 'data.tar.gz',
+    content,
+    chunkSize: 4,
+  })
+
+  // The ciphertext and its sha256 are untouched — only the seal's own record of what chunk 2
+  // decrypts to is wrong, which is what telstore's own bug (not tampering, not a wrong
+  // password) would look like: every check before the plaintext one still passes.
+  const tampered = sealManifest(
+    { ...manifest },
+    keys,
+    plainSha256.map((hash, i) => (i === 1 ? 'f'.repeat(64) : hash)),
+  )
+  const manifestBytes = serializeManifest(tampered)
+  const messages = [
+    ...pieces.map((piece) => ({
+      id: piece.msgId,
+      fileName: chunkFileName(tampered.id, piece.i),
+      bytes: piece.bytes,
+    })),
+    { id: 2000, fileName: manifestFileName(tampered.id), bytes: manifestBytes },
+  ]
+  const backup = { id: tampered.id, content, messages, manifest: tampered, manifestBytes }
+
+  const child = fakeChild()
+  const { deps } = fakeChat(backup, child, ws, passwordDeps())
+
+  await assert.rejects(
+    () => runRestoreStream(backup.id, ARGV, {}, deps),
+    /Chunk 2 matched its encrypted sha256 but decrypted to bytes that do not match the manifest/,
+  )
+
+  // The first chunk's plaintext reached the command; the second one's never did.
+  assert.deepEqual(child.bytes(), content.subarray(0, 4))
+  assert.deepEqual(await fs.readdir(tempDirFor(ws.configDir)), [])
 })
