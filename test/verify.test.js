@@ -277,3 +277,24 @@ test('a backup small enough for one request says nothing about progress', async 
 
   assert.equal(errors.join(''), '')
 })
+
+test('an encrypted backup is verified without a password, and says it is locked', async () => {
+  const configDir = await workspace()
+  const backup = fakeBackup()
+  const out = collect()
+  const encrypted = {
+    ...backup.manifest,
+    v: 2,
+    enc: { salt: '0'.repeat(32), hint: 'the cat', sealed: 'AAAA' },
+    chunks: backup.manifest.chunks.map((chunk) => ({ ...chunk, iv: '0'.repeat(16) })),
+  }
+
+  const result = await runVerify(
+    ID,
+    {},
+    deps(backup, configDir, out, { manifestBytes: serializeManifest(encrypted) }),
+  )
+
+  assert.deepEqual(result.damaged, [])
+  assert.match(out.text(), /Lock {3}encrypted \(hint: the cat\)/)
+})

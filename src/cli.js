@@ -38,6 +38,7 @@ export const OPTIONS = {
   'download-concurrency': { type: 'string' },
   out: { type: 'string' },
   note: { type: 'string' },
+  encrypt: { type: 'boolean' },
   limit: { type: 'string' },
   search: { type: 'string' },
   verbose: { type: 'boolean' },
@@ -139,6 +140,12 @@ Options apply to one run and are never saved. Use config to change a setting for
                               spaces in it has to be quoted — --note "march archive" — or the
                               shell hands the words after the first to telstore as more files
                               to upload.
+  --encrypt                   Encrypt the contents with a password before they leave this
+                              machine. Asks for the password twice and for an optional hint,
+                              which is shown in the chat as plain text. restore, tarx and join
+                              see from the manifest that a backup is encrypted and ask for the
+                              password themselves. The file name, note and size stay readable,
+                              and a forgotten password is a lost backup.
   --limit <n>                 How many backups list shows this run.
   --search <text>             List only the backups whose file name, note, backup id or
                               creation day contains this text. Telegram's own index does
@@ -423,7 +430,7 @@ function requireOneBackupId(ids, what) {
   }
 }
 
-export function route(argv) {
+function routeLine(argv) {
   const { head, childArgv } = splitAtTerminator(argv)
 
   const { values, positionals, tokens } = parseArgs({
@@ -551,4 +558,20 @@ export function route(argv) {
   // Every positional, not just the first: `telstore a b c` used to upload `a` and drop the
   // rest without a word, which is the one thing this project never does.
   return { command: 'upload', args: positionals, options: values, filesAfterNote, childArgv, shortcut: null }
+}
+
+// Encryption is decided when a backup is made; every command that reads one learns it from the
+// manifest. A flag beside a restore would read as "decrypt with this", which it would not be,
+// and a flag that silently does nothing is one nobody can predict without the source.
+export function route(argv) {
+  const parsed = routeLine(argv)
+
+  if (parsed.options.encrypt && parsed.command !== 'upload' && parsed.command !== 'help') {
+    throw new Error(
+      '--encrypt applies to uploads only. restore, tarx and join see from the manifest that a ' +
+        'backup is encrypted and ask for its password by themselves.',
+    )
+  }
+
+  return parsed
 }

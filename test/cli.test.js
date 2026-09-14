@@ -634,3 +634,29 @@ test('Ctrl-C during a join says nothing was joined and how to start over', () =>
   assert.match(message, /Nothing was joined/)
   assert.match(message, /again/)
 })
+
+test('--encrypt is an upload option, for a file, a command and tarc', () => {
+  assert.equal(route(['a.tar', '--encrypt']).options.encrypt, true)
+  assert.equal(route(['a.tar', '--encrypt', '--', 'tar', 'cf', '-', './a']).options.encrypt, true)
+
+  const tarc = route(['tarc', 'a', './a', '--encrypt'])
+  assert.equal(tarc.command, 'upload')
+  assert.equal(tarc.options.encrypt, true)
+})
+
+for (const line of [
+  ['restore', 'telstore-20260914-ab12cd', '--encrypt'],
+  ['tarx', 'telstore-20260914-ab12cd', '--encrypt'],
+  ['join', 'x.manifest.json', '--encrypt'],
+  ['verify', 'telstore-20260914-ab12cd', '--encrypt'],
+  ['list', '--encrypt'],
+]) {
+  test(`--encrypt is refused on ${line[0]}, which sees encryption in the manifest`, () => {
+    assert.throws(() => route(line), /--encrypt applies to uploads only/)
+  })
+}
+
+test('the help names --encrypt', () => {
+  assert.match(HELP, /--encrypt/)
+  assert.ok(OPTIONS.encrypt)
+})

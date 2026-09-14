@@ -10,7 +10,7 @@ import {
   readMessageBytes as realReadMessageBytes,
 } from '../client.js'
 import { configFile, defaultConfigDir, loadConfig } from '../config.js'
-import { chunkFileName, manifestFileName, parseManifest } from '../manifest.js'
+import { chunkFileName, isEncrypted, manifestFileName, parseManifest } from '../manifest.js'
 import { formatBytes, formatDuration, plural } from '../progress.js'
 import { assertLoggedIn } from '../session.js'
 import { requireChat, resolveSettings } from '../settings.js'
@@ -131,6 +131,12 @@ export async function runVerify(backupId, options = {}, deps = {}) {
         `(${formatBytes(manifest.size)}, ${plural(total, 'chunk')})`,
     )
     log(`In     ${describeChat(chat)}`)
+
+    // Said, not checked: verify never has the password and never needs it. What it asks the chat
+    // about — presence, file name, length — is the same for ciphertext.
+    if (isEncrypted(manifest)) {
+      log(`Lock   encrypted${manifest.enc.hint ? ` (hint: ${manifest.enc.hint})` : ''}`)
+    }
     log('')
 
     // A backup at the 10000-chunk ceiling is a hundred requests, sent one at a time. Silence
