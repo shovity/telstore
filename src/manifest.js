@@ -5,6 +5,19 @@ import { countChunks } from './chunking.js'
 
 export const MANIFEST_VERSION = 1
 
+// An encrypted backup's manifest, and only that. The bump is what stops an older telstore, which
+// checks `v` and nothing else it does not know: handed a version 1 manifest with an extra `enc`
+// in it, it would download the ciphertext, match every sha256 (they are the ciphertext's), match
+// the length (CTR keeps it), rename, and print Done over a file of random bytes.
+export const ENCRYPTED_MANIFEST_VERSION = 2
+
+const SALT_HEX = /^[0-9a-f]{32}$/
+const IV_HEX = /^[0-9a-f]{16}$/
+
+export function isEncrypted(manifest) {
+  return manifest?.v === ENCRYPTED_MANIFEST_VERSION
+}
+
 export function newBackupId(now = new Date(), randomHex = () => randomBytes(3).toString('hex')) {
   const yyyy = now.getUTCFullYear()
   const mm = String(now.getUTCMonth() + 1).padStart(2, '0')
@@ -103,9 +116,10 @@ export function buildManifest({
   chunks,
   createdAt = new Date().toISOString(),
   note = null,
+  enc = null,
 }) {
   return {
-    v: MANIFEST_VERSION,
+    v: enc ? ENCRYPTED_MANIFEST_VERSION : MANIFEST_VERSION,
     id,
     name,
     size,
@@ -114,9 +128,19 @@ export function buildManifest({
     // Absent rather than null when there is none: a manifest without a note has to be the
     // same file telstore wrote before the flag existed, down to the bytes.
     ...(note ? { note } : {}),
+    // The same rule for encryption: a plain backup's manifest is today's manifest exactly.
+    ...(enc ? { enc } : {}),
+    // Picked field by field, which is also what keeps a chunk's plaintext hash out: it travels
+    // in the state record and in the seal, never in the open.
     chunks: [...chunks]
       .sort((a, b) => a.i - b.i)
-      .map(({ i, msgId, size: chunkBytes, sha256 }) => ({ i, msgId, size: chunkBytes, sha256 })),
+      .map(({ i, msgId, size: chunkBytes, sha256, iv }) => ({
+        i,
+        msgId,
+        size: chunkBytes,
+        sha256,
+        ...(enc ? { iv } : {}),
+      })),
   }
 }
 
@@ -167,12 +191,53 @@ export function manifestMessageIds(manifest) {
   })
 }
 
+// Structure only. Whether the seal opens is a question for the password, which verify never
+// has and never needs — so everything here is answerable from the file alone.
+function checkEncryption(manifest) {
+  const { enc } = manifest
+
+  if (typeof enc !== 'object' || enc === null || Array.isArray(enc)) {
+    throw new Error('Manifest is version 2, which is encrypted, but carries no encryption details.')
+  }
+
+  if (typeof enc.salt !== 'string' || !SALT_HEX.test(enc.salt)) {
+    throw new Error(`Manifest records ${JSON.stringify(enc.salt)} as its salt, which is not 32 hex characters.`)
+  }
+
+  if (enc.hint !== undefined && typeof enc.hint !== 'string') {
+    throw new Error(`Manifest records a hint of ${JSON.stringify(enc.hint)}, which is not text.`)
+  }
+
+  if (typeof enc.sealed !== 'string' || enc.sealed === '') {
+    throw new Error('Manifest is encrypted but carries no sealed part, so nothing can check what it decrypts to.')
+  }
+
+  manifest.chunks.forEach((chunk, index) => {
+    if (typeof chunk.iv !== 'string' || !IV_HEX.test(chunk.iv)) {
+      throw new Error(
+        `Manifest records ${JSON.stringify(chunk.iv)} as the iv of chunk ${index + 1}, which is not 16 hex characters.`,
+      )
+    }
+  })
+}
+
 export function parseManifest(input) {
   const manifest = parseManifestJson(input)
 
-  if (manifest.v !== MANIFEST_VERSION) {
+  if (manifest.v !== MANIFEST_VERSION && manifest.v !== ENCRYPTED_MANIFEST_VERSION) {
     throw new Error(
-      `Manifest uses version ${manifest.v}, this build of telstore only understands version ${MANIFEST_VERSION}.`,
+      `Manifest uses version ${manifest.v}, this build of telstore only understands versions ` +
+        `${MANIFEST_VERSION} and ${ENCRYPTED_MANIFEST_VERSION}.`,
+    )
+  }
+
+  // Version 1 is never encrypted. A manifest claiming both would be restored as plain bytes by
+  // every telstore that reads version 1, which is the silent wrong file the bump exists to stop.
+  if (manifest.v === MANIFEST_VERSION && manifest.enc !== undefined) {
+    throw new Error(
+      'Manifest says version 1, which is never encrypted, and carries encryption fields anyway. ' +
+        'Restoring it as version 1 would hand over encrypted bytes as the file, so telstore is ' +
+        'not reading it.',
     )
   }
 
@@ -226,6 +291,8 @@ export function parseManifest(input) {
       throw new Error(`Manifest is missing chunk ${index}: the chunk list is not contiguous.`)
     }
   })
+
+  if (manifest.v === ENCRYPTED_MANIFEST_VERSION) checkEncryption(manifest)
 
   const expectedChunks = countChunks(manifest.size, manifest.chunkSize)
   if (manifest.chunks.length !== expectedChunks) {

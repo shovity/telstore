@@ -1,6 +1,10 @@
 import { promises as fs, rmSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import os from 'node:os'
 import path from 'node:path'
+
+import { chunkCipher, deriveKeys, newIv, newSalt, sealManifest } from '../src/cipher.js'
+import { buildManifest } from '../src/manifest.js'
 
 // A config that passes assertLoggedIn. Tests that only need to get past the login gate
 // say LOGGED_IN rather than restating what a valid session happens to look like.
@@ -86,4 +90,72 @@ export function uploadDeps(client) {
     sendManifest: async (c, peer, args) => c.sendManifest(peer, args),
     disconnect: async () => {},
   }
+}
+
+export const PASSWORD = 'correct horse battery'
+
+// Built with the real cipher, never a stand-in: a fake that "encrypted" by copying is exactly
+// the fake that would let an upload with no transform wired in pass every round trip.
+export async function encryptedBackup({
+  id = 'telstore-20260914-ab12cd',
+  name = 'data.tar',
+  content,
+  chunkSize,
+  password = PASSWORD,
+  hint = null,
+  firstMsgId = 1000,
+}) {
+  const salt = newSalt()
+  const keys = await deriveKeys(password, salt)
+  const pieces = []
+  const chunks = []
+  const plainSha256 = []
+
+  for (let offset = 0, i = 0; offset < content.length; offset += chunkSize, i += 1) {
+    const clear = content.subarray(offset, Math.min(offset + chunkSize, content.length))
+    const iv = newIv()
+    const bytes = chunkCipher(keys.chunkKey, iv).apply(clear, 0)
+    const msgId = firstMsgId + i
+
+    pieces.push({ i, msgId, bytes })
+    chunks.push({ i, msgId, size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), iv })
+    plainSha256.push(createHash('sha256').update(clear).digest('hex'))
+  }
+
+  const built = buildManifest({
+    id,
+    name,
+    size: content.length,
+    chunkSize,
+    chunks,
+    enc: { salt, ...(hint ? { hint } : {}) },
+  })
+
+  return { manifest: sealManifest(built, keys, plainSha256), pieces, keys, plainSha256 }
+}
+
+// The password seam every encrypted test drives. `asked` records what was asked for, so a test
+// can say "one password for the whole batch" about the prompts rather than about a count.
+export function passwordDeps({ password = PASSWORD, hint = null, asked = [] } = {}) {
+  return {
+    interactive: () => true,
+    askNewPassword: async () => {
+      asked.push('new')
+      return { password, hint }
+    },
+    askPassword: async (question) => {
+      asked.push(question)
+      return password
+    },
+  }
+}
+
+// Whether any `run`-byte stretch of the plaintext appears in what was sent. Only meaningful for
+// plaintext with no repetition in it — use random bytes.
+export function sharesRun(haystack, plain, run = 64) {
+  for (let at = 0; at + run <= plain.length; at += 1) {
+    if (haystack.includes(plain.subarray(at, at + run))) return true
+  }
+
+  return false
 }

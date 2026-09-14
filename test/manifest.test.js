@@ -12,6 +12,8 @@ import {
   parseManifest,
   parseManifestJson,
   manifestMessageIds,
+  ENCRYPTED_MANIFEST_VERSION,
+  isEncrypted,
 } from '../src/manifest.js'
 
 function sampleChunks() {
@@ -352,3 +354,79 @@ test('backupIdDay reads the id newBackupId writes', () => {
 
   assert.equal(backupIdDay(newBackupId(at, () => 'abc123')), Date.UTC(2026, 8, 5) / 1000)
 })
+
+// --- encrypted manifests (version 2) -----------------------------------------------------
+
+function encryptedFields(overrides = {}) {
+  return {
+    id: 'telstore-20260914-ab12cd',
+    name: 'data.tar',
+    size: 20,
+    chunkSize: 16,
+    createdAt: '2026-09-14T08:00:00.000Z',
+    enc: { salt: '0'.repeat(32), hint: 'the cat' },
+    chunks: [
+      { i: 0, msgId: 1001, size: 16, sha256: 'a'.repeat(64), iv: '0'.repeat(16), plainSha256: 'c'.repeat(64) },
+      { i: 1, msgId: 1002, size: 4, sha256: 'b'.repeat(64), iv: '1'.repeat(16), plainSha256: 'd'.repeat(64) },
+    ],
+    ...overrides,
+  }
+}
+
+function sealedLooking(manifest) {
+  return { ...manifest, enc: { ...manifest.enc, sealed: 'AAAA' } }
+}
+
+test('an encrypted manifest is version 2 and keeps each chunk iv but never its plaintext hash', () => {
+  const manifest = buildManifest(encryptedFields())
+
+  assert.equal(manifest.v, ENCRYPTED_MANIFEST_VERSION)
+  assert.deepEqual(Object.keys(manifest), ['v', 'id', 'name', 'size', 'chunkSize', 'createdAt', 'enc', 'chunks'])
+  assert.deepEqual(manifest.chunks.map((chunk) => chunk.iv), ['0'.repeat(16), '1'.repeat(16)])
+  assert.equal(JSON.stringify(manifest).includes('plainSha256'), false)
+  assert.equal(isEncrypted(manifest), true)
+})
+
+test('a plain manifest is still version 1 with no enc and no iv', () => {
+  const { enc, ...fields } = encryptedFields()
+  const manifest = buildManifest(fields)
+
+  assert.equal(manifest.v, 1)
+  assert.equal('enc' in manifest, false)
+  assert.equal(manifest.chunks.some((chunk) => 'iv' in chunk), false)
+  assert.equal(isEncrypted(manifest), false)
+})
+
+test('parseManifest reads a well-formed version 2 manifest without any password', () => {
+  const parsed = parseManifest(serializeManifest(sealedLooking(buildManifest(encryptedFields()))))
+  assert.equal(parsed.v, 2)
+  assert.equal(parsed.enc.hint, 'the cat')
+})
+
+// An older telstore reading this as version 1 would restore the ciphertext and call it the file.
+test('a version 1 manifest carrying encryption fields is refused', () => {
+  const manifest = { ...sealedLooking(buildManifest(encryptedFields())), v: 1 }
+  assert.throws(() => parseManifest(JSON.stringify(manifest)), /version 1, which is never encrypted/)
+})
+
+test('a version 3 manifest names the versions this telstore understands', () => {
+  const manifest = { ...sealedLooking(buildManifest(encryptedFields())), v: 3 }
+  assert.throws(() => parseManifest(JSON.stringify(manifest)), /understands versions 1 and 2/)
+})
+
+const BROKEN_V2 = {
+  'no enc at all': (m) => { delete m.enc },
+  'a salt that is not 32 hex characters': (m) => { m.enc.salt = 'abc' },
+  'a hint that is not text': (m) => { m.enc.hint = 42 },
+  'no sealed part': (m) => { delete m.enc.sealed },
+  'a chunk without an iv': (m) => { delete m.chunks[1].iv },
+  'an iv that is not 16 hex characters': (m) => { m.chunks[0].iv = 'xyz' },
+}
+
+for (const [what, breakIt] of Object.entries(BROKEN_V2)) {
+  test(`a version 2 manifest with ${what} is refused`, () => {
+    const manifest = structuredClone(sealedLooking(buildManifest(encryptedFields())))
+    breakIt(manifest)
+    assert.throws(() => parseManifest(JSON.stringify(manifest)), /Manifest/)
+  })
+}
