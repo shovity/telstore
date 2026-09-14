@@ -44,6 +44,11 @@ export async function uploadRange(client, fd, options) {
     onProgress,
     retryOptions,
     stallMs = DEFAULT_STALL_MS,
+    // Applied to each part as it is read, in order, before it is hashed or sent — so the sha256
+    // this returns is of the bytes Telegram holds, and a retry resends the same transformed
+    // buffer rather than transforming again. It is what encryption rides on, and this file knows
+    // nothing else about it.
+    transform = (bytes) => bytes,
   } = options
 
   // A pool of fewer than one worker does no work. In the download path that means
@@ -94,7 +99,7 @@ export async function uploadRange(client, fd, options) {
       for (let part = start; part < end; part += 1) {
         const partOffset = part * partSize
         const partLength = Math.min(partSize, length - partOffset)
-        const bytes = await readExactly(fd, partLength, offset + partOffset)
+        const bytes = transform(await readExactly(fd, partLength, offset + partOffset), partOffset)
 
         hash.update(bytes)
 

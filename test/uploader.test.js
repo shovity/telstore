@@ -399,3 +399,47 @@ test('uploadRange refuses a worker count below one instead of spinning', { timeo
 
   await handle.close()
 })
+
+// The hook encryption rides on. A transform that is never called would still pass every round
+// trip, so this asserts what was sent, not what came back.
+test('a transform sees each part in order, and what it returns is what is sent and hashed', async () => {
+  const dir = await tempDir('uploader-transform')
+  const file = path.join(dir, 'source.bin')
+  const content = randomBytes(1000)
+  await fs.writeFile(file, content)
+
+  const client = fakeClient()
+  const seen = []
+  const flip = (bytes) => Buffer.from(bytes.map((byte) => byte ^ 0x5a))
+  const handle = await fs.open(file, 'r')
+
+  let result
+  try {
+    result = await uploadRange(client, handle.fd, {
+      offset: 100,
+      length: 700,
+      fileName: 'x.part0001',
+      partSize: 256,
+      concurrency: 2,
+      transform: (bytes, at) => {
+        seen.push({ at, bytes: Buffer.from(bytes) })
+        return flip(bytes)
+      },
+    })
+  } finally {
+    await handle.close()
+  }
+
+  assert.deepEqual(seen.map((part) => part.at), [0, 256, 512])
+  assert.deepEqual(Buffer.concat(seen.map((part) => part.bytes)), content.subarray(100, 800))
+
+  const expected = flip(content.subarray(100, 800))
+  const sent = Buffer.concat(
+    [...client.requests]
+      .sort((a, b) => a.filePart - b.filePart)
+      .map((request) => Buffer.from(request.bytes)),
+  )
+
+  assert.deepEqual(sent, expected)
+  assert.equal(result.sha256, createHash('sha256').update(expected).digest('hex'))
+})
