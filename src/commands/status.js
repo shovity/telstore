@@ -87,6 +87,7 @@ const NO_RESUME = {
   changed: 'the file has changed since the backup started',
   'not-a-file': 'that path is no longer a file',
   unreadable: 'the record does not name a file that can be read',
+  damaged: 'the record is damaged, and upload refuses to carry on from it',
 }
 
 // Why the .partial cannot be resumed from, in the same spirit as NO_RESUME above: an

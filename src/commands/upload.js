@@ -27,6 +27,7 @@ import { createProgress, formatBytes, formatDuration } from '../progress.js'
 import {
   MAX_STATES,
   clearState,
+  encryptedStateKey,
   loadState,
   markChunkDone,
   pruneStates,
@@ -206,9 +207,57 @@ export async function runUpload(filePath, options = {}, deps = {}) {
   const chat = requireChat(settings)
   const concurrency = settings.uploadConcurrency
 
-  const key = stateKey(absPath, stat.size, stat.mtimeMs)
+  const encrypt = Boolean(options.encrypt)
+
+  // An encrypted record lives under a key of its own so an older telstore cannot find it (see
+  // encryptedStateKey). This run reads and writes its own key only, and looks under the other one
+  // just to refuse: a record there is this same file, unfinished the other way round.
+  const plainKey = stateKey(absPath, stat.size, stat.mtimeMs)
+  const encryptedKey = encryptedStateKey(absPath, stat.size, stat.mtimeMs)
+  const key = encrypt ? encryptedKey : plainKey
+  const otherKey = encrypt ? plainKey : encryptedKey
 
   let state = await loadState(key, configDir)
+  const other = await loadState(otherKey, configDir)
+
+  // A record whose kind disagrees with the key it is filed under was not written by this build —
+  // a hand edit, or this branch before encrypted records moved. One carrying `enc` under the plain
+  // key is exactly what an older telstore would resume in plain, so neither kind is trusted to say
+  // which way it goes: both are refused as damaged, whichever way this run was asked to go.
+  const filed = [
+    { filedUnder: plainKey, record: encrypt ? other : state, encrypted: false },
+    { filedUnder: encryptedKey, record: encrypt ? state : other, encrypted: true },
+  ]
+
+  for (const { filedUnder, record, encrypted } of filed) {
+    if (record && Boolean(record.enc) !== encrypted) {
+      throw new Error(
+        `The record of this unfinished backup says it is ${record.enc ? '' : 'not '}encrypted but is ` +
+          `filed where ${record.enc ? 'a plain' : 'an encrypted'} one belongs, so telstore cannot ` +
+          `tell how the chunks already sent went up. ${stateFile(filedUnder, configDir)} is damaged — ` +
+          'delete it and run again to start a new backup, which leaves the chunks already sent ' +
+          'sitting in the chat with nothing to point at them.',
+      )
+    }
+  }
+
+  // An unfinished backup is encrypted or it is not, and the chunks already in the chat decide
+  // which. Carrying on the other way would mix plaintext and ciphertext in one backup no manifest
+  // could describe, so a run that disagrees is refused the way a disagreeing --chunk-size is.
+  if (other) {
+    const file = stateFile(otherKey, configDir)
+
+    throw new Error(
+      other.enc
+        ? `This unfinished backup is encrypted, and this run has no --encrypt. Run again with ` +
+            `--encrypt to carry on, or delete ${file} and run again to start a new backup, which ` +
+            'leaves the chunks already sent sitting in the chat with nothing to point at them.'
+        : `This unfinished backup is not encrypted, and this run asks for --encrypt — the chunks ` +
+            `already in ${other.chat} went up as they are. Run again without --encrypt to carry ` +
+            `on, or delete ${file} and run again to start a new, encrypted backup, which leaves ` +
+            'the chunks already sent sitting in the chat with nothing to point at them.',
+    )
+  }
 
   // The chunks already in the chat were cut at the size this backup started with, and
   // nothing can re-cut them. Carrying on at a different size would abandon every one of
@@ -256,26 +305,6 @@ export async function runUpload(filePath, options = {}, deps = {}) {
         `a single backup cannot be split across two destinations. Run again with ` +
         `--chat ${state.chat} to carry on sending there, or delete ${file} and run again to ` +
         `start a new backup in ${chat}.`,
-    )
-  }
-
-  const encrypt = Boolean(options.encrypt)
-
-  // An unfinished backup is encrypted or it is not, and the chunks already in the chat decide
-  // which. Carrying on the other way would mix plaintext and ciphertext in one backup no manifest
-  // could describe, so a run that disagrees is refused the way a disagreeing --chunk-size is.
-  if (resuming && Boolean(state.enc) !== encrypt) {
-    const file = stateFile(key, configDir)
-
-    throw new Error(
-      state.enc
-        ? `This unfinished backup is encrypted, and this run has no --encrypt. Run again with ` +
-            `--encrypt to carry on, or delete ${file} and run again to start a new backup, which ` +
-            'leaves the chunks already sent sitting in the chat with nothing to point at them.'
-        : `This unfinished backup is not encrypted, and this run asks for --encrypt — the chunks ` +
-            `already in ${state.chat} went up as they are. Run again without --encrypt to carry ` +
-            `on, or delete ${file} and run again to start a new, encrypted backup, which leaves ` +
-            'the chunks already sent sitting in the chat with nothing to point at them.',
     )
   }
 

@@ -4,6 +4,7 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 
 import {
+  encryptedStateKey,
   stateKey,
   streamKey,
   loadState,
@@ -291,6 +292,38 @@ test('canResume refuses a file touched since the backup started, size unchanged'
   await fs.utimes(file, later, later)
 
   assert.deepEqual(await canResume(key, state), { ok: false, reason: 'changed' })
+})
+
+test('canResume accepts an encrypted record filed under the encrypted key', async () => {
+  const dir = await tempDir('state')
+  const { file, state } = await recordFor(dir)
+  const stat = await fs.stat(file)
+  const encrypted = { ...state, enc: { salt: '0'.repeat(32), check: '0'.repeat(64) } }
+
+  assert.deepEqual(await canResume(encryptedStateKey(file, stat.size, stat.mtimeMs), encrypted), { ok: true })
+})
+
+// runUpload refuses a record sitting under the other kind's key rather than resuming it, so
+// status must not offer a resume command for it — nor call an untouched file "changed".
+test('canResume calls a record filed under the other kind of key damaged', async () => {
+  const dir = await tempDir('state')
+  const { file, state, key } = await recordFor(dir)
+  const stat = await fs.stat(file)
+  const encrypted = { ...state, enc: { salt: '0'.repeat(32), check: '0'.repeat(64) } }
+
+  assert.deepEqual(await canResume(key, encrypted), { ok: false, reason: 'damaged' })
+  assert.deepEqual(await canResume(encryptedStateKey(file, stat.size, stat.mtimeMs), state), {
+    ok: false,
+    reason: 'damaged',
+  })
+})
+
+test('encryptedStateKey is shaped like stateKey and never equal to it', () => {
+  const plain = stateKey('/home/ai/data.tar', 100, 1757000000000)
+  const encrypted = encryptedStateKey('/home/ai/data.tar', 100, 1757000000000)
+
+  assert.match(encrypted, /^[0-9a-f]{40}$/)
+  assert.notEqual(encrypted, plain)
 })
 
 test('canResume refuses a file that is no longer there', async () => {

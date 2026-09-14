@@ -26,7 +26,10 @@
 - The local record is the only pointer to chunks in the chat, so `runUpload` refuses a
   `--chunk-size` that differs from the unfinished backup's own rather than starting over,
   and `pruneStates` (keeps `MAX_STATES` most recent) names on stderr every id it drops,
-  even when the caller asked for silence.
+  even when the caller asked for silence. An encrypted upload's record is filed under
+  `encryptedStateKey` rather than `stateKey`, so an older telstore — which finds a resume by
+  `stateKey` and never reads `enc` — misses it instead of finishing the backup in plain
+  (`docs/design/encryption.md`).
 - A resumed `runRestore` decides what is already in `<target>.partial` by hashing each
   chunk-sized region against the manifest, in order, stopping at the first that does not
   match — never by reading a record. A record makes claims about a local file anyone can

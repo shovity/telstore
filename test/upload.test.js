@@ -9,7 +9,7 @@ import { parseManifestCaption } from '../src/caption.js'
 import { chunkCipher, openManifest } from '../src/cipher.js'
 import { parseManifest } from '../src/manifest.js'
 import { saveConfig } from '../src/config.js'
-import { loadState, stateFile, stateKey, MAX_STATES } from '../src/state.js'
+import { encryptedStateKey, loadState, saveState, stateFile, stateKey, MAX_STATES } from '../src/state.js'
 
 import { PASSWORD, fakeClient, passwordDeps, sharesRun, tempDir, uploadDeps } from './helpers.js'
 
@@ -1229,7 +1229,7 @@ test('the record of an unfinished encrypted upload holds a salt and a check, nev
     ),
   )
 
-  const file = stateFile(stateKey(ws.filePath, stat.size, stat.mtimeMs), ws.configDir)
+  const file = stateFile(encryptedStateKey(ws.filePath, stat.size, stat.mtimeMs), ws.configDir)
   const text = await fs.readFile(file, 'utf8')
   const state = JSON.parse(text)
 
@@ -1290,7 +1290,80 @@ test('a resumed encrypted upload refuses a different password and keeps its reco
     /not the password backup telstore-\d{8}-[0-9a-f]{6} was started with/,
   )
 
-  assert.ok(await loadState(stateKey(ws.filePath, stat.size, stat.mtimeMs), ws.configDir))
+  assert.ok(await loadState(encryptedStateKey(ws.filePath, stat.size, stat.mtimeMs), ws.configDir))
+})
+
+// The property that protects an older telstore, asserted directly: that build looks a resume up
+// under stateKey and never reads `enc`, so an encrypted record it could find is one it would
+// finish in plain, under a version 1 manifest that restores to half ciphertext.
+test('an unfinished encrypted upload is filed where an older telstore cannot find it', async () => {
+  const ws = await tempWorkspace(1000)
+  const stat = await fs.stat(ws.filePath)
+
+  await assert.rejects(() =>
+    runUpload(ws.filePath, { chat: '@store', 'chunk-size': '400', encrypt: true }, encryptedRun(fakeClient({ failOnChunk: 1 }), ws)),
+  )
+
+  const plainKey = stateKey(ws.filePath, stat.size, stat.mtimeMs)
+  const encryptedKey = encryptedStateKey(ws.filePath, stat.size, stat.mtimeMs)
+
+  assert.match(encryptedKey, /^[0-9a-f]{40}$/)
+  assert.notEqual(encryptedKey, plainKey)
+  assert.equal(await loadState(plainKey, ws.configDir), null)
+  assert.ok((await loadState(encryptedKey, ws.configDir)).enc)
+})
+
+// Written by this branch before encrypted records moved, or by a hand edit. Resumed without
+// --encrypt it is exactly the half-ciphertext backup the move exists to stop, so neither way of
+// running may carry on from it — and nothing may be sent.
+test('an encrypted record filed under the plain key is refused as damaged, with or without --encrypt', async () => {
+  const ws = await tempWorkspace(1000)
+
+  await assert.rejects(() =>
+    runUpload(ws.filePath, { chat: '@store', 'chunk-size': '400', encrypt: true }, encryptedRun(fakeClient({ failOnChunk: 1 }), ws)),
+  )
+
+  const stat = await fs.stat(ws.filePath)
+  const encryptedKey = encryptedStateKey(ws.filePath, stat.size, stat.mtimeMs)
+  const plainKey = stateKey(ws.filePath, stat.size, stat.mtimeMs)
+
+  await saveState(plainKey, await loadState(encryptedKey, ws.configDir), ws.configDir)
+  await fs.unlink(stateFile(encryptedKey, ws.configDir))
+
+  for (const encrypt of [false, true]) {
+    const client = fakeClient()
+
+    await assert.rejects(
+      () => runUpload(ws.filePath, { chat: '@store', 'chunk-size': '400', encrypt }, encryptedRun(client, ws)),
+      (err) => {
+        assert.match(err.message, /says it is encrypted but is filed where a plain one belongs/)
+        assert.ok(err.message.includes(stateFile(plainKey, ws.configDir)))
+        return true
+      },
+    )
+
+    assert.equal(client.messages.length, 0)
+  }
+})
+
+test('a plain record filed under the encrypted key is refused as damaged', async () => {
+  const ws = await tempWorkspace(1000)
+
+  await assert.rejects(() =>
+    runUpload(ws.filePath, { chat: '@store', 'chunk-size': '400' }, encryptedRun(fakeClient({ failOnChunk: 1 }), ws)),
+  )
+
+  const stat = await fs.stat(ws.filePath)
+  const encryptedKey = encryptedStateKey(ws.filePath, stat.size, stat.mtimeMs)
+  const plainKey = stateKey(ws.filePath, stat.size, stat.mtimeMs)
+
+  await saveState(encryptedKey, await loadState(plainKey, ws.configDir), ws.configDir)
+  await fs.unlink(stateFile(plainKey, ws.configDir))
+
+  await assert.rejects(
+    () => runUpload(ws.filePath, { chat: '@store', 'chunk-size': '400', encrypt: true }, encryptedRun(fakeClient(), ws)),
+    /says it is not encrypted but is filed where an encrypted one belongs/,
+  )
 })
 
 test('an unfinished encrypted upload is refused without --encrypt', async () => {
@@ -1343,4 +1416,5 @@ test('a password that cannot be had stops the run before a record or a connectio
 
   assert.equal(connected, false)
   assert.equal(await loadState(stateKey(ws.filePath, stat.size, stat.mtimeMs), ws.configDir), null)
+  assert.equal(await loadState(encryptedStateKey(ws.filePath, stat.size, stat.mtimeMs), ws.configDir), null)
 })

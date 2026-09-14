@@ -36,6 +36,17 @@
   their choosing that telstore prints above a password prompt.
 - **Passwords come from a terminal only**, the rule `token` keeps. A resumed upload asks again
   and compares an HMAC check kept in the record; neither the password nor a key touches disk.
+- **An unfinished encrypted upload's record is filed under `encryptedStateKey`, not `stateKey`,
+  for the reason the manifest went to version 2.** An older telstore finds a resume by
+  `stateKey(path, size, mtime)` — which every build computes identically — and never reads `enc`.
+  Run without `--encrypt` over an encrypted record it would resume it, send the remaining chunks
+  in plain, write a version 1 manifest with no ivs, and a later restore would match every sha256
+  and print Done over a file that is half ciphertext. A lookup that misses is the only refusal an
+  older build can be made to give. The key is sha1 of `enc:<path>:<size>:<mtime>`, the same
+  40-hex shape, so listings, pruning and `status` need nothing new. This build looks under both
+  keys: a record under the other one is the encrypt/plain mismatch refusal, and a record whose
+  `enc` disagrees with the key it is filed under is refused as damaged in either direction —
+  never resumed in plain.
 - **The hint is capped at 100 characters because that is what the caption has left** — measured
   2026-09-14, the worst card without encryption is 899 of 1024.
 - **What is not promised:** the name, note, size, chunk count, dates and hint are readable by

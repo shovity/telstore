@@ -6,6 +6,7 @@ import path from 'node:path'
 import { runStatus } from '../src/commands/status.js'
 import { loadConfig, saveConfig } from '../src/config.js'
 import {
+  encryptedStateKey,
   restoreFile,
   restoreKey,
   saveRestore,
@@ -878,7 +879,7 @@ test('the resume command of an encrypted upload carries --encrypt', async () => 
   const stat = await fs.stat(file)
 
   await saveState(
-    stateKey(file, stat.size, stat.mtimeMs),
+    encryptedStateKey(file, stat.size, stat.mtimeMs),
     {
       id: 'telstore-20260914-ab12cd',
       chat: '@my_backups',

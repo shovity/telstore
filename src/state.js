@@ -75,6 +75,18 @@ export function stateKey(absPath, size, mtimeMs) {
   return createHash('sha1').update(`${absPath}:${size}:${mtimeMs}`).digest('hex')
 }
 
+// Where an encrypted upload's record is filed, and the reason it is not filed under stateKey is
+// the reason the manifest went to version 2: an older telstore. That build computes stateKey
+// exactly as this one does and never reads `enc`, so given an unfinished encrypted record under
+// that key it would resume it without --encrypt, send the remaining chunks in plain, write a
+// version 1 manifest with no ivs in it — and a later restore would match every sha256 and print
+// Done over a file that is half ciphertext. A lookup that misses is the only refusal an older
+// build can be made to give. Same 40-hex shape, so every listing, prune and status report that
+// already handles upload records handles this one without learning a new name.
+export function encryptedStateKey(absPath, size, mtimeMs) {
+  return createHash('sha1').update(`enc:${absPath}:${size}:${mtimeMs}`).digest('hex')
+}
+
 export function stateFile(key, configDir = defaultConfigDir()) {
   return path.join(stateDir(configDir), `${key}.json`)
 }
@@ -282,7 +294,8 @@ export async function findStates(backupId, configDir = defaultConfigDir()) {
 // Whether a record can still be resumed, which is not a question about the record alone:
 // runUpload hashes the file it finds on disk and looks the result up, so a backup is
 // resumable exactly when that hash is still the key this record is filed under. Recomputing
-// through stateKey rather than comparing size and mtime by hand is the point — a second way
+// through stateKey (encryptedStateKey for an encrypted record) rather than comparing size and
+// mtime by hand is the point — a second way
 // of asking is a second way to drift, and status would end up promising a resume that upload
 // turns into a brand new backup, stranding every chunk already sent.
 //
@@ -306,7 +319,16 @@ export async function canResume(key, state) {
   }
 
   if (!stat.isFile()) return { ok: false, reason: 'not-a-file' }
-  if (stateKey(state.path, stat.size, stat.mtimeMs) !== key) return { ok: false, reason: 'changed' }
+
+  // Two keys now, and the record says which one it belongs under: runUpload files an encrypted
+  // record under encryptedStateKey and a plain one under stateKey. A record sitting under the
+  // other kind's key for a file that has not changed is not a changed file — runUpload refuses
+  // it as damaged rather than resume it, and the report has to say the same thing.
+  const own = (state.enc ? encryptedStateKey : stateKey)(state.path, stat.size, stat.mtimeMs)
+  const other = (state.enc ? stateKey : encryptedStateKey)(state.path, stat.size, stat.mtimeMs)
+
+  if (key === other) return { ok: false, reason: 'damaged' }
+  if (key !== own) return { ok: false, reason: 'changed' }
 
   return { ok: true }
 }
