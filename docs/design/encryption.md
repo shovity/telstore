@@ -70,5 +70,38 @@
 
 ## Measured
 
-<!-- Task 13 fills this in from the e2e run: chunk size, restore wall time with and without
-     --encrypt, the share the decryption pass took, the machine. -->
+**What encryption costs a restore does not show above Telegram's own variance at 16MB.** Measured
+2026-09-14 in the project's throwaway e2e channel: one file of 16,777,993 random bytes (not a
+multiple of 512KB), cut at 11,534,336-byte chunks — `LARGE_FILE_THRESHOLD` plus 1MB — so one chunk
+above the threshold and a 5,243,657-byte remainder below it, downloaded at the default concurrency
+of 8. The same bytes went up twice, once plain and once with `--encrypt`, and each was restored
+three times from a fresh process, the two alternated, the password typed ahead so the prompt cost
+no human time. Wall time, process start to exit, connect and manifest search included:
+
+| run | plain | encrypted |
+| --- | --- | --- |
+| 1 | 8.36s | 9.28s |
+| 2 | 9.41s | 8.73s |
+| 3 | 8.13s | 9.66s |
+| mean | 8.63s | 9.22s |
+
+All six matched the source sha256. The gap between the means, 0.59s, is smaller than the spread
+inside the plain column alone, 1.28s, so this says the cost is lost in the noise at this size — not
+what the cost is. What it is was measured apart from any restore, on the same machine: scrypt took
+279–749ms per derivation over three runs (the spread is unexplained), the decryption pass over the
+same two chunks 130–244ms, and `decryptInPlace` over a 512MB file 81–115MB/s. Against the ~6MB/s
+download that `src/chunking.js` records, that is roughly 16–22s of decryption per default 1800MB
+chunk against about 300s of download — a few percent, and paid in series: a chunk is decrypted only
+after its ciphertext hash has matched, and the next download waits for it.
+
+The machine: Intel Xeon E5-2690 v2 @ 3.00GHz, 31GB of RAM, Node v22.23.1, Ubuntu 24.04.4 LTS on
+Linux 6.8, ext4.
+
+What the measurement could not see. Each restore is about eight seconds of transfer, the burst
+length the `e2e` skill says has reported speeds 10–19% off, and three runs a side cannot separate a
+7% difference from that. One machine, one account, one chat, one afternoon. The 512MB figure came
+from a file that fit in the page cache: `decryptInPlace` reads each chunk back out of the `.partial`
+and writes it again, and on a disk slower than the cache a full 1800MB chunk pays that second read
+and write in full, which nothing here measured. Nor did this time an encrypted upload, a restore
+into a command (`tarx`), or `join` — each was checked for correct bytes in the same run, not for
+speed.
