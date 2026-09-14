@@ -5,9 +5,10 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 
 import { runJoin } from '../src/commands/join.js'
+import { sealManifest } from '../src/cipher.js'
 import { buildManifest, chunkFileName, manifestFileName, serializeManifest } from '../src/manifest.js'
 
-import { collect, tempDir } from './helpers.js'
+import { collect, encryptedBackup, passwordDeps, tempDir } from './helpers.js'
 
 function sha(buf) {
   return createHash('sha256').update(buf).digest('hex')
@@ -212,6 +213,84 @@ test('join names its temporary file while it writes and unnames it when done', a
   await runJoin(backup.manifestPath, { out }, quiet({ onTempChunk: (file) => seen.push(file) }))
 
   assert.deepEqual(seen, [`${out}.joining`, null])
+})
+
+async function downloadedEncrypted(content) {
+  const dir = await tempDir('join-encrypted')
+  const { manifest, pieces } = await encryptedBackup({ content, chunkSize: 400 })
+
+  for (const piece of pieces) await fs.writeFile(path.join(dir, chunkFileName(manifest.id, piece.i)), piece.bytes)
+
+  const manifestPath = path.join(dir, manifestFileName(manifest.id))
+  await fs.writeFile(manifestPath, serializeManifest(manifest))
+
+  return { dir, manifestPath }
+}
+
+test('an encrypted backup joins to its plaintext', async () => {
+  const content = randomBytes(1000)
+  const backup = await downloadedEncrypted(content)
+  const out = path.join(backup.dir, 'out.tar')
+
+  await runJoin(backup.manifestPath, { out }, quiet(passwordDeps()))
+
+  assert.deepEqual(await fs.readFile(out), content)
+})
+
+test('an encrypted join with a wrong password writes nothing', async () => {
+  const backup = await downloadedEncrypted(randomBytes(1000))
+  const out = path.join(backup.dir, 'out.tar')
+
+  await assert.rejects(
+    () => runJoin(backup.manifestPath, { out }, quiet(passwordDeps({ password: 'wrong' }))),
+    /either the password is wrong/,
+  )
+
+  assert.equal(await exists(out), false)
+  assert.equal(await exists(`${out}.joining`), false)
+})
+
+test('an encrypted join with no terminal is refused before anything is written', async () => {
+  const backup = await downloadedEncrypted(randomBytes(100))
+  const out = path.join(backup.dir, 'out.tar')
+
+  await assert.rejects(
+    () => runJoin(backup.manifestPath, { out }, quiet({ ...passwordDeps(), interactive: () => false })),
+    /no terminal/,
+  )
+
+  assert.equal(await exists(`${out}.joining`), false)
+})
+
+test('a chunk that decrypts to the wrong bytes is refused, even though its ciphertext matched', async () => {
+  const dir = await tempDir('join-encrypted')
+  const { manifest, pieces, keys, plainSha256 } = await encryptedBackup({
+    content: randomBytes(1000),
+    chunkSize: 400,
+  })
+
+  for (const piece of pieces) await fs.writeFile(path.join(dir, chunkFileName(manifest.id, piece.i)), piece.bytes)
+
+  // The ciphertext sha256 in the manifest is untouched — only the sealed plaintext hash for
+  // chunk 1 is wrong, so the chunk file itself passes its first check and only decrypting it
+  // can catch this.
+  const tampered = sealManifest(
+    { ...manifest },
+    keys,
+    plainSha256.map((hash, i) => (i === 1 ? 'f'.repeat(64) : hash)),
+  )
+  const manifestPath = path.join(dir, manifestFileName(manifest.id))
+  await fs.writeFile(manifestPath, serializeManifest(tampered))
+
+  const out = path.join(dir, 'out.tar')
+
+  await assert.rejects(
+    () => runJoin(manifestPath, { out }, quiet(passwordDeps())),
+    /decrypted to bytes that do not match/,
+  )
+
+  assert.equal(await exists(out), false)
+  assert.equal(await exists(`${out}.joining`), false)
 })
 
 test('join unnames its temporary file when a chunk fails too', async () => {

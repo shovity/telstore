@@ -3,7 +3,9 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 
 import { askConfirm } from '../confirm.js'
-import { chunkFileName, parseManifest, safeOutName } from '../manifest.js'
+import { chunkCipher } from '../cipher.js'
+import { chunkFileName, isEncrypted, parseManifest, safeOutName } from '../manifest.js'
+import { askPassword as realAskPassword, unlockManifest } from '../password.js'
 import { createProgress, formatBytes } from '../progress.js'
 
 // Big enough that a 1800MB chunk is a couple of hundred reads, small enough that one buffer
@@ -92,10 +94,14 @@ async function writeAll(handle, buffer, length, position) {
 // checked up front, and is checked again here because the file is read now, not then: a
 // download still being written, or replaced in between, is a different file from the one
 // that was stat'd.
-async function copyChunk({ file, handle, offset, chunk, count, buffer, advance }) {
+//
+// For an encrypted backup the file holds ciphertext: that is what is hashed against the
+// manifest, and the plaintext written into place is hashed against the seal.
+async function copyChunk({ file, handle, offset, chunk, count, buffer, advance, cipher = null, plainSha256 = null }) {
   const name = path.basename(file)
   const source = await fs.open(file, 'r')
   const hash = createHash('sha256')
+  const plain = cipher ? createHash('sha256') : null
   let copied = 0
 
   try {
@@ -108,8 +114,12 @@ async function copyChunk({ file, handle, offset, chunk, count, buffer, advance }
         throw new Error(`${name} grew past the ${chunk.size} bytes the manifest records while it was being read.`)
       }
 
-      hash.update(buffer.subarray(0, bytesRead))
-      await writeAll(handle, buffer, bytesRead, offset + copied)
+      const read = buffer.subarray(0, bytesRead)
+      const out = cipher ? cipher.apply(read, copied) : read
+
+      hash.update(read)
+      plain?.update(out)
+      await writeAll(handle, out, bytesRead, offset + copied)
       copied += bytesRead
       advance(bytesRead)
     }
@@ -127,6 +137,13 @@ async function copyChunk({ file, handle, offset, chunk, count, buffer, advance }
         'It is damaged or belongs to another backup — download it again.',
     )
   }
+
+  if (plain && plain.digest('hex') !== plainSha256) {
+    throw new Error(
+      `${name} matched its encrypted sha256 but decrypted to bytes that do not match the ` +
+        `manifest for chunk ${chunk.i + 1}/${count}. That points at telstore rather than at the download.`,
+    )
+  }
 }
 
 // The offline half of restore: the chunks and the manifest were downloaded by hand, from
@@ -141,6 +158,8 @@ export async function runJoin(manifestPath, options = {}, deps = {}) {
     log: writeLog = (line) => console.log(line),
     silent = false,
     onTempChunk = () => {},
+    askPassword = realAskPassword,
+    interactive = () => Boolean(process.stdin.isTTY),
   } = deps
 
   const log = silent ? () => {} : writeLog
@@ -153,6 +172,13 @@ export async function runJoin(manifestPath, options = {}, deps = {}) {
   const files = manifest.chunks.map((chunk) => path.join(dir, chunkFileName(manifest.id, chunk.i)))
 
   await checkChunkFiles(manifest, files, dir)
+
+  // After the files are known to be there — that costs nothing and needs no password — and
+  // before the overwrite question, for restore's reason: nobody should answer [y/N] about a
+  // file telstore then cannot decrypt.
+  const opened = isEncrypted(manifest)
+    ? await unlockManifest(manifest, { askPassword, interactive, say: log })
+    : null
 
   const target = path.resolve(cwd, options.out ?? safeOutName(manifest.name))
 
@@ -175,6 +201,7 @@ export async function runJoin(manifestPath, options = {}, deps = {}) {
   }
 
   log(`Backup ${manifest.id}`)
+  if (opened) log('Lock   encrypted')
   log(`File   ${target} (${formatBytes(manifest.size)}, ${manifest.chunks.length} chunks)`)
   log(`From   ${dir}\n`)
 
@@ -202,6 +229,8 @@ export async function runJoin(manifestPath, options = {}, deps = {}) {
           count,
           buffer,
           advance: progress.advance,
+          cipher: opened ? chunkCipher(opened.keys.chunkKey, chunk.iv) : null,
+          plainSha256: opened ? opened.plainSha256[chunk.i] : null,
         })
       }
     } finally {
