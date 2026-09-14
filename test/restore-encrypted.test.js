@@ -4,6 +4,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 
+import { sealManifest } from '../src/cipher.js'
 import { runRestore, runRestores } from '../src/commands/restore.js'
 import { saveConfig } from '../src/config.js'
 import { chunkFileName, manifestFileName, serializeManifest } from '../src/manifest.js'
@@ -100,16 +101,25 @@ test('three wrong passwords stop the restore before any chunk is fetched or file
 test('no terminal is refused by name before anything is fetched', async () => {
   const { dir, configDir } = await workspace()
   const backup = await encryptedBackup({ content: randomBytes(100), chunkSize: 400 })
+  const fetched = []
 
   await assert.rejects(
     () =>
       runRestore(
         backup.manifest.id,
         { out: path.join(dir, 'out.tar') },
-        deps(chat([backup]), configDir, { interactive: () => false }),
+        deps(chat([backup]), configDir, {
+          interactive: () => false,
+          getMessage: async (_c, _p, msgId) => {
+            fetched.push(msgId)
+            return null
+          },
+        }),
       ),
     /is encrypted, and there is no terminal/,
   )
+
+  assert.deepEqual(fetched, [])
 })
 
 test('a hint altered in the chat stops the manifest opening', async () => {
@@ -133,6 +143,29 @@ test('a chunk altered in the chat is caught by its encrypted sha256 before decry
     () => runRestore(backup.manifest.id, { out: path.join(dir, 'out.tar') }, deps(messages, configDir)),
     /Chunk 2 has a sha256 that does not match the manifest/,
   )
+})
+
+// The ciphertext sha256 still matches — the chunk on the wire is exactly what went up — so
+// only the sealed plaintext hash can catch this. That points at telstore's own cipher rather
+// than at the backup, and the .partial is kept rather than renamed over the target.
+test('a chunk that decrypts to the wrong bytes is refused as a telstore fault, not renamed', async () => {
+  const { dir, configDir } = await workspace()
+  const backup = await encryptedBackup({ content: randomBytes(1000), chunkSize: 400 })
+  const tampered = sealManifest(
+    backup.manifest,
+    backup.keys,
+    backup.plainSha256.map((hash, i) => (i === 1 ? 'f'.repeat(64) : hash)),
+  )
+  const altered = { ...backup, manifest: tampered }
+  const out = path.join(dir, 'out.tar')
+
+  await assert.rejects(
+    () => runRestore(backup.manifest.id, { out }, deps(chat([altered]), configDir)),
+    /decrypted to bytes that do not match the manifest/,
+  )
+
+  await assert.rejects(() => fs.stat(out), { code: 'ENOENT' })
+  await assert.doesNotReject(() => fs.stat(`${out}.partial`))
 })
 
 // The .partial holds plaintext once a chunk is done, so the scan has to compare against the
